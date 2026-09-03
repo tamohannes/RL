@@ -62,6 +62,10 @@ from nemo_rl.environments.nemo_gym import (
 )
 from nemo_rl.experience.interfaces import NEMO_GYM_TASK_INDEX_KEY
 from nemo_rl.experience.metric_utils import calculate_single_metric, pct
+from nemo_rl.experience.nemo_gym_identity import (
+    infer_nemo_gym_rollouts_per_prompt,
+    stamp_nemo_gym_rollout_identity,
+)
 from nemo_rl.models.generation.interfaces import (
     ROUTED_EXPERTS_MISSING_ROUTE_SENTINEL,
     GenerationConfig,
@@ -2292,9 +2296,13 @@ def _prepare_nemo_gym_rows(
     rows: list[dict],
     generation_config: GenerationConfig,
     sampling_params: GenerationSamplingParams,
+    *,
+    input_indices: Sequence[Any] | None,
+    rollouts_per_prompt: int,
+    attempt_index: int,
 ) -> None:
-    """Apply NeMo-RL sampling parameters and stable row indices in place."""
-    for row_index, row in enumerate(rows):
+    """Apply sampling parameters and canonical Gym rollout identity in place."""
+    for row in rows:
         responses_create_params = row.get("responses_create_params")
         if not isinstance(responses_create_params, dict):
             raise TypeError(
@@ -2310,7 +2318,12 @@ def _prepare_nemo_gym_rows(
             if row_max_tokens is not None
             else configured_max_tokens
         )
-        row["_rowidx"] = row_index
+    stamp_nemo_gym_rollout_identity(
+        rows,
+        input_indices=input_indices,
+        rollouts_per_prompt=rollouts_per_prompt,
+        attempt_index=attempt_index,
+    )
 
 
 def _tensorize_nemo_gym_result(result: dict) -> None:
@@ -2346,6 +2359,8 @@ async def run_async_nemo_gym_rollout(
     sampling_params: Optional[GenerationSamplingParams] = None,
     deduplicate_multimodal_data: bool = False,
     debug_payload_metrics: bool = False,
+    rollouts_per_prompt: Optional[int] = None,
+    attempt_index: int = 0,
 ) -> AsyncGenerator[NemoGymRolloutResult, None]:
     """Stream complete NeMo-Gym prompt groups in group-completion order.
 
@@ -2384,6 +2399,9 @@ async def run_async_nemo_gym_rollout(
             remote Gym return and restore the exact original payload locally.
         debug_payload_metrics: Emit logical, physical, and serialized media
             payload metrics at the Gym Ray boundary.
+        rollouts_per_prompt: Number of repeated rows per original prompt for
+            canonical rollout-index stamping. Defaults to ``num_generations``.
+        attempt_index: Zero-based collection attempt stamped onto every row.
 
     Yields:
         ``NemoGymRolloutResult`` objects in prompt-group completion order. Rows
@@ -2444,6 +2462,10 @@ async def run_async_nemo_gym_rollout(
     )
     if num_generations <= 0:
         raise ValueError("num_generations must be greater than zero")
+    if rollouts_per_prompt is None:
+        rollouts_per_prompt = num_generations
+    if rollouts_per_prompt <= 0:
+        raise ValueError("rollouts_per_prompt must be greater than zero")
     if not nemo_gym_rows:
         raise ValueError("NeMo-Gym rollout batch must not be empty")
     if len(nemo_gym_rows) % num_generations != 0:
@@ -2469,7 +2491,14 @@ async def run_async_nemo_gym_rollout(
     run_rollouts_timer_label = f"{timer_prefix}/run_rollouts"
 
     with timer.time(total_timer_label):
-        _prepare_nemo_gym_rows(nemo_gym_rows, generation_config, sampling_params)
+        _prepare_nemo_gym_rows(
+            nemo_gym_rows,
+            generation_config,
+            sampling_params,
+            input_indices=input_batch.get("idx"),
+            rollouts_per_prompt=rollouts_per_prompt,
+            attempt_index=attempt_index,
+        )
         accumulator = _NemoGymStreamAccumulator(
             rows=nemo_gym_rows,
             num_generations=num_generations,
@@ -2588,6 +2617,7 @@ def run_nemo_gym_rollout_sync(
     mask_env_flagged_samples: bool = True,
     deduplicate_multimodal_data: bool = False,
     debug_payload_metrics: bool = False,
+    rollouts_per_prompt: Optional[int] = None,
 ) -> NemoGymRolloutResult:
     """Run and return one complete NeMo-Gym batch synchronously.
 
@@ -2619,6 +2649,8 @@ def run_nemo_gym_rollout_sync(
         deduplicate_multimodal_data: Omit initial policy-ready media from the
             remote Gym return and restore it from the input batch.
         debug_payload_metrics: Emit exact Gym Ray-boundary media payload metrics.
+        rollouts_per_prompt: Number of repeated rows per original prompt. When
+            omitted, infer it from consecutive equal ``input_batch.idx`` values.
 
     Returns:
         The fully postprocessed NeMo-Gym rollout batch in input-row order.
@@ -2653,6 +2685,15 @@ def run_nemo_gym_rollout_sync(
             sampling_params=sampling_params,
             deduplicate_multimodal_data=deduplicate_multimodal_data,
             debug_payload_metrics=debug_payload_metrics,
+            rollouts_per_prompt=(
+                rollouts_per_prompt
+                if rollouts_per_prompt is not None
+                else infer_nemo_gym_rollouts_per_prompt(
+                    input_batch.get("idx"),
+                    batch_size=input_batch.size,
+                )
+            ),
+            attempt_index=0,
         ):
             pass
         if rollout_result is None:

@@ -82,6 +82,9 @@ class VllmSpecificArgs(TypedDict):
     expose_http_server: NotRequired[bool]
     # Environment variable containing the internal refit API key.
     http_refit_api_key_env_var: NotRequired[str | None]
+    # Environment variable containing the bearer token for generation HTTP routes.
+    # The variable name is safe to keep in config; its value stays process-local.
+    http_generation_api_key_env_var: NotRequired[str | None]
     # Invalidate weight-dependent multimodal encoder outputs after a successful
     # async refit. Enable only when generation is quiesced during weight updates.
     reset_encoder_cache_after_weight_update: NotRequired[bool]

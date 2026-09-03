@@ -25,6 +25,8 @@ import pytest
 import ray
 import requests
 import torch
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from nemo_rl.algorithms.grpo import refit_policy_generation
 from nemo_rl.algorithms.loss import NLLLossFn
@@ -182,6 +184,64 @@ async def test_async_vllm_worker_uses_native_keep_pause_and_resume() -> None:
 
     worker.llm.pause_generation.assert_awaited_once_with(mode="keep", clear_cache=False)
     worker.llm.resume_generation.assert_awaited_once_with()
+
+
+def test_async_vllm_generation_http_auth_blocks_untrusted_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = "policy-generation-token-01234567890123456789"
+    monkeypatch.setenv("TEST_POLICY_GENERATION_TOKEN", token)
+    worker = VllmAsyncGenerationWorkerImpl.__new__(VllmAsyncGenerationWorkerImpl)
+    worker.cfg = {
+        "vllm_cfg": {"http_generation_api_key_env_var": "TEST_POLICY_GENERATION_TOKEN"}
+    }
+    app = FastAPI()
+    calls = 0
+
+    @app.post("/v1/chat/completions")
+    async def completion():
+        nonlocal calls
+        calls += 1
+        return {"ok": True}
+
+    worker._install_generation_http_auth(app)
+    client = TestClient(app)
+
+    assert client.post("/v1/chat/completions", json={}).status_code == 403
+    assert (
+        client.post(
+            "/v1/chat/completions",
+            json={},
+            headers={"Authorization": "Bearer wrong"},
+        ).status_code
+        == 403
+    )
+    assert calls == 0
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert token not in response.text
+    assert calls == 1
+
+
+def test_async_vllm_generation_http_auth_requires_available_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TEST_POLICY_GENERATION_TOKEN", raising=False)
+    worker = VllmAsyncGenerationWorkerImpl.__new__(VllmAsyncGenerationWorkerImpl)
+    worker.cfg = {
+        "vllm_cfg": {"http_generation_api_key_env_var": "TEST_POLICY_GENERATION_TOKEN"}
+    }
+
+    with pytest.raises(
+        RuntimeError, match="generation HTTP authentication is unavailable"
+    ):
+        worker._install_generation_http_auth(FastAPI())
 
 
 def test_vllm_generation_broadcasts_native_refit_pause_and_resume(

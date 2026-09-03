@@ -45,6 +45,11 @@ from nemo_rl.environments.nemo_gym_multimodal import (
     _without_initial_media_sources,
     normalize_media_in_examples,
 )
+from nemo_rl.environments.nemo_gym_loopback import (
+    NEMO_GYM_LOOPBACK_HOST,
+    assert_nemo_gym_node_ip_ingress_denied,
+    validate_nemo_gym_loopback_bindings,
+)
 from nemo_rl.experience.failures import (
     GymTransportError,
     RolloutDataFailure,
@@ -191,6 +196,14 @@ class NemoGymConfig(TypedDict):
     model_name: str
     base_urls: List[str]
     initial_global_config_dict: Dict[str, Any]
+    # Bind the Gym head server and every Gym-managed child service to
+    # 127.0.0.1. Intended for colocated single-node runs carrying private
+    # verifier configuration; the default remains the existing node-IP mode.
+    loopback_only: NotRequired[bool]
+    # Retain the exact raw token arrays returned by Gym in ``full_result``.
+    # This is opt-in because the arrays are intentionally removed from normal
+    # result logging to keep table payloads small.
+    retain_token_audit: NotRequired[bool]
     # Port range for Gym HTTP servers (head server + subprocess servers).
     # Defaults to DEFAULT_GYM_PORT_RANGE_LOW/HIGH (5000-5999) from
     # nemo_rl.distributed.virtual_cluster.  See the port layout there.
@@ -375,6 +388,10 @@ class NemoGym(EnvironmentInterface):
         self.head_server_port = _get_free_port_local(_gym_port_low, _gym_port_high)
 
         from nemo_gym.cli import GlobalConfigDictParserConfig, RunHelper
+        from nemo_gym.global_config import (
+            GlobalConfigDictParser,
+            get_global_config_dict,
+        )
         from nemo_gym.rollout_collection import RolloutCollectionHelper
         from nemo_gym.server_utils import HEAD_SERVER_KEY_NAME, BaseServerConfig
         from omegaconf import DictConfig
@@ -397,10 +414,22 @@ class NemoGym(EnvironmentInterface):
             "dummy_key"  # No key necessary for training.
         )
         initial_global_config_dict["policy_base_url"] = self.cfg["base_urls"]
+        loopback_only = self.cfg.get("loopback_only", None)
+        if loopback_only is not None and not isinstance(loopback_only, bool):
+            raise TypeError(
+                f"env.nemo_gym.loopback_only must be a boolean, got {loopback_only!r}"
+            )
+
         # In multinode runs, Gym-managed service configs must advertise a real node IP
         # rather than falling back to localhost, or remote workers will connect to
-        # their own loopback interface instead of the actor-hosted service.
-        initial_global_config_dict.setdefault("default_host", self.node_ip)
+        # their own loopback interface instead of the actor-hosted service. The
+        # signal canary opts into loopback-only services because every Gym process
+        # and client is colocated and its global config contains private verifier gold.
+        service_host = NEMO_GYM_LOOPBACK_HOST if loopback_only is True else self.node_ip
+        if loopback_only is True:
+            initial_global_config_dict["default_host"] = service_host
+        else:
+            initial_global_config_dict.setdefault("default_host", service_host)
 
         _gym_port_low = self.cfg.get("port_range_low", DEFAULT_GYM_PORT_RANGE_LOW)
         _gym_port_high = self.cfg.get("port_range_high", DEFAULT_GYM_PORT_RANGE_HIGH)
@@ -437,23 +466,48 @@ Depending on your data shape, you may want to change these values."""
 
         # Head server
         initial_global_config_dict[HEAD_SERVER_KEY_NAME] = {
-            "host": "0.0.0.0",
+            "host": service_host if loopback_only is True else "0.0.0.0",
             "port": self.head_server_port,
         }
 
-        self.rh = RunHelper()
-        self.rh.start(
-            global_config_dict_parser_config=GlobalConfigDictParserConfig(
-                dotenv_path=Path(__file__.removesuffix(RELATIVE_PATH)).absolute()
-                / "nemo_gym_env.yaml",
-                initial_global_config_dict=DictConfig(initial_global_config_dict),
-                skip_load_from_cli=True,
-            )
+        parser_config = GlobalConfigDictParserConfig(
+            dotenv_path=Path(__file__.removesuffix(RELATIVE_PATH)).absolute()
+            / "nemo_gym_env.yaml",
+            initial_global_config_dict=DictConfig(initial_global_config_dict),
+            skip_load_from_cli=True,
         )
+        loopback_bindings: list[tuple[str, int]] = []
+        if loopback_only is True:
+            # Resolve all config_paths now so an explicitly non-loopback child
+            # host fails before RunHelper starts the head or child processes.
+            resolved_global_config = get_global_config_dict(
+                global_config_dict_parser_config=parser_config
+            )
+            parser = GlobalConfigDictParser()
+            loopback_bindings = validate_nemo_gym_loopback_bindings(
+                global_config_dict=resolved_global_config,
+                server_instance_configs=parser.filter_for_server_instance_configs(
+                    resolved_global_config
+                ),
+                head_server_key_name=HEAD_SERVER_KEY_NAME,
+            )
+
+        self.rh = RunHelper()
+        self.rh.start(global_config_dict_parser_config=parser_config)
+        if loopback_only is True:
+            try:
+                assert_nemo_gym_node_ip_ingress_denied(
+                    node_ip=self.node_ip,
+                    bindings=loopback_bindings,
+                )
+            except Exception:
+                self.rh.shutdown()
+                self.rh = None
+                raise
 
         # Setup for rollout collection
         self.head_server_config = BaseServerConfig(
-            host=self.node_ip,
+            host=service_host,
             port=self.head_server_port,
         )
         self.rch = RolloutCollectionHelper()
@@ -653,7 +707,12 @@ Depending on your data shape, you may want to change these values."""
         nemo_rl_message_log = []
         seen_token_ids: List[int] = []
         batch_decode_items = []
-        for output_item_dict in nemo_gym_result["response"]["output"]:
+        token_audit_turns: list[dict[str, Any]] | None = (
+            [] if self.cfg.get("retain_token_audit", False) else None
+        )
+        for output_item_index, output_item_dict in enumerate(
+            nemo_gym_result["response"]["output"]
+        ):
             # Nemo RL really only has two types of messages: assistant and not assistant since that is all that it is concerned with (i.e. to train or not to train)
             # Here we map all the trainable messages to assistant and all the non-trainable messages to user.
             # Eventually we can maybe be smarter about this, but this is functional for now.
@@ -671,6 +730,34 @@ Seen token IDs: {seen_token_ids}
 Output prompt token IDs: {output_item_dict["prompt_token_ids"]}
 output prompt token ids till seen: {output_item_dict["prompt_token_ids"][: len(seen_token_ids)]}
 """
+
+            if token_audit_turns is not None:
+                raw_prompt_token_ids = [
+                    int(token_id) for token_id in output_item_dict["prompt_token_ids"]
+                ]
+                raw_generation_token_ids = [
+                    int(token_id)
+                    for token_id in output_item_dict["generation_token_ids"]
+                ]
+                raw_generation_logprobs = [
+                    float(logprob)
+                    for logprob in output_item_dict["generation_log_probs"]
+                ]
+                if len(raw_generation_token_ids) != len(raw_generation_logprobs):
+                    raise ValueError(
+                        "NeMo Gym returned mismatched generation token IDs and "
+                        "logprobs while token auditing was enabled: "
+                        f"tokens={len(raw_generation_token_ids)}, "
+                        f"logprobs={len(raw_generation_logprobs)}"
+                    )
+                token_audit_turns.append(
+                    {
+                        "output_item_index": output_item_index,
+                        "prompt_token_ids": raw_prompt_token_ids,
+                        "generation_token_ids": raw_generation_token_ids,
+                        "generation_logprobs": raw_generation_logprobs,
+                    }
+                )
 
             prompt_token_ids = output_item_dict.pop("prompt_token_ids")
             generation_token_ids = output_item_dict.pop("generation_token_ids")
@@ -832,6 +919,12 @@ output prompt token ids till seen: {output_item_dict["prompt_token_ids"][: len(s
                     container[key], _ = _without_initial_media_sources(
                         container[key], raw_initial_sources
                     )
+
+        if token_audit_turns is not None:
+            nemo_gym_result["_nemo_rl_token_audit"] = {
+                "version": 1,
+                "turns": token_audit_turns,
+            }
 
         result = {
             "message_log": nemo_rl_message_log,
@@ -1002,6 +1095,17 @@ def spinup_nemo_gym_actor(
     invalid_tool_call_patterns = nemo_gym_dict.pop("invalid_tool_call_patterns", None)
     thinking_tags = nemo_gym_dict.pop("thinking_tags", None)
     tokenizer_config = nemo_gym_dict.pop("tokenizer_config", None)
+    loopback_only = nemo_gym_dict.pop("loopback_only", None)
+    if loopback_only is not None and not isinstance(loopback_only, bool):
+        raise TypeError(
+            f"env.nemo_gym.loopback_only must be a boolean, got {loopback_only!r}"
+        )
+    retain_token_audit = nemo_gym_dict.pop("retain_token_audit", None)
+    if retain_token_audit is not None and not isinstance(retain_token_audit, bool):
+        raise TypeError(
+            "env.nemo_gym.retain_token_audit must be a boolean, "
+            f"got {retain_token_audit!r}"
+        )
     # Same treatment for the multimodal knobs: NemoGymConfig declares them as
     # top-level fields, so populate them here instead of leaving the actor to
     # read them back out of Gym's global config dict.
@@ -1032,6 +1136,10 @@ def spinup_nemo_gym_actor(
         initial_global_config_dict=nemo_gym_dict,
         **multimodal_flags,
     )
+    if loopback_only is not None:
+        nemo_gym_cfg["loopback_only"] = loopback_only
+    if retain_token_audit is not None:
+        nemo_gym_cfg["retain_token_audit"] = retain_token_audit
 
     nemo_gym_py_exec = get_actor_python_env("nemo_rl.environments.nemo_gym.NemoGym")
     if nemo_gym_py_exec.startswith("uv"):

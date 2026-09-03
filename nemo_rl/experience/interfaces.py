@@ -16,8 +16,16 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from nemo_rl.data.interfaces import LLMMessageLogType, VLMMessageLogType
+from nemo_rl.experience.nemo_gym_identity import (
+    NEMO_GYM_ATTEMPT_INDEX_KEY as NEMO_GYM_ATTEMPT_INDEX_KEY,
+)
+from nemo_rl.experience.nemo_gym_identity import (
+    NEMO_GYM_ROLLOUT_INDEX_KEY as NEMO_GYM_ROLLOUT_INDEX_KEY,
+)
+from nemo_rl.experience.nemo_gym_identity import (
+    NEMO_GYM_TASK_INDEX_KEY as NEMO_GYM_TASK_INDEX_KEY,
+)
 
-NEMO_GYM_TASK_INDEX_KEY = "_ng_task_index"
 NEXT_NEMO_GYM_TASK_INDEX_KEY = "next_ng_task_index"
 # Unconsumed suffix of a gap-fill dataloader batch, carried in the async
 # collector's rollouts state so a checkpoint cannot strand yielded prompts.

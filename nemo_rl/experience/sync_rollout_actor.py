@@ -263,6 +263,7 @@ class SyncRolloutActor:
                 thinking_tags=get_nemo_gym_thinking_tags(cfg.env),
                 deduplicate_multimodal_data=cfg.grpo.deduplicate_multimodal_data,
                 debug_payload_metrics=cfg.grpo.debug_payload_metrics,
+                rollouts_per_prompt=group_size,
             )
             final_batch, rollout_metrics = r.final_batch, r.rollout_metrics
         else:

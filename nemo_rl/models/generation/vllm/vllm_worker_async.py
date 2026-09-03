@@ -15,7 +15,9 @@
 import asyncio
 import copy
 import gc
+import hmac
 import logging
+import os
 import threading
 import time
 import uuid
@@ -25,7 +27,8 @@ from typing import Any, AsyncGenerator, Optional, cast
 import ray
 import torch
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.distributed.virtual_cluster import (
@@ -57,6 +60,16 @@ from nemo_rl.models.generation.openai_server_utils import (
 from nemo_rl.telemetry.setup import shutdown_telemetry
 
 LOGGER = logging.getLogger(__name__)
+
+_GENERATION_HTTP_PATHS = frozenset(
+    {
+        "/tokenize",
+        "/v1/chat/completions",
+        "/v1/completions",
+        "/v1/models",
+        "/v1/responses",
+    }
+)
 
 
 from nemo_rl.distributed.refit_watchdog import RefitAborted, is_refit_abort
@@ -348,6 +361,34 @@ class VllmAsyncGenerationWorkerImpl(
 
     async def report_dp_openai_server_base_url(self) -> Optional[str]:
         return self.base_url
+
+    def _install_generation_http_auth(self, app: FastAPI) -> None:
+        """Require a job-scoped bearer token on exposed generation routes."""
+        token_env_var = self.cfg["vllm_cfg"].get("http_generation_api_key_env_var")
+        if token_env_var is None:
+            return
+        if not isinstance(token_env_var, str) or not token_env_var:
+            raise RuntimeError("generation HTTP authentication is misconfigured")
+        expected = os.environ.get(token_env_var, "")
+        if len(expected) < 32:
+            raise RuntimeError("generation HTTP authentication is unavailable")
+
+        @app.middleware("http")
+        async def require_generation_auth(request: Request, call_next):
+            path = request.url.path.rstrip("/") or "/"
+            if path in _GENERATION_HTTP_PATHS:
+                authorization = request.headers.get("authorization", "")
+                prefix = "Bearer "
+                presented = (
+                    authorization[len(prefix) :]
+                    if authorization.startswith(prefix)
+                    else ""
+                )
+                if not hmac.compare_digest(presented, expected):
+                    return JSONResponse(
+                        status_code=403, content={"detail": "forbidden"}
+                    )
+            return await call_next(request)
 
     # ruff: noqa
     def _setup_vllm_openai_api_server(self, app: FastAPI) -> FastAPI:
@@ -917,6 +958,7 @@ class VllmAsyncGenerationWorkerImpl(
         app = self._setup_vllm_openai_api_server(app)
         if self._sparse_refit_receiver is not None:
             self._sparse_refit_receiver.setup_api_server(app)
+        self._install_generation_http_auth(app)
 
         ########################################
         # Server spinup

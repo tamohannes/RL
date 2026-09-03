@@ -47,7 +47,7 @@ class _Backend:
         self.name = name
         self.status = status
         self.body = body
-        self.requests: list[tuple[str, str, bytes]] = []
+        self.requests: list[tuple[str, str, bytes, dict[str, str]]] = []
         self._runner: web.AppRunner | None = None
         self.port = _free_port()
 
@@ -59,7 +59,14 @@ class _Backend:
         app = web.Application()
 
         async def _handle(request: web.Request) -> web.Response:
-            self.requests.append((request.method, request.path, await request.read()))
+            self.requests.append(
+                (
+                    request.method,
+                    request.path,
+                    await request.read(),
+                    dict(request.headers),
+                )
+            )
             return web.Response(
                 status=self.status,
                 body=self.body,
@@ -112,10 +119,20 @@ class _Harness:
         for backend in self.backends:
             await backend.stop()
 
-    async def call(self, path: str, *, method: str = "POST", body: bytes = b"{}"):
+    async def call(
+        self,
+        path: str,
+        *,
+        method: str = "POST",
+        body: bytes = b"{}",
+        headers: dict[str, str] | None = None,
+    ):
         async with ClientSession() as session:
             async with session.request(
-                method, f"http://127.0.0.1:{self.port}{path}", data=body
+                method,
+                f"http://127.0.0.1:{self.port}{path}",
+                data=body,
+                headers=headers,
             ) as response:
                 return response.status, await response.read(), dict(response.headers)
 
@@ -153,6 +170,21 @@ class TestEndpointSurface:
                 payload = b'{"model":"x","messages":[{"role":"user"}]}'
                 await harness.call("/v1/chat/completions", body=payload)
                 assert backend.requests[0][2] == payload
+
+        asyncio.run(_main())
+
+    def test_authorization_header_is_forwarded_to_protected_backend(self):
+        backend = _Backend("b0")
+
+        async def _main():
+            async with _Harness([backend]) as harness:
+                await harness.call(
+                    "/v1/chat/completions",
+                    headers={"Authorization": "Bearer process-local-token"},
+                )
+                assert backend.requests[0][3]["Authorization"] == (
+                    "Bearer process-local-token"
+                )
 
         asyncio.run(_main())
 

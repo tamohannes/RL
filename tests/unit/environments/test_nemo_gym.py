@@ -1231,6 +1231,81 @@ def test_nemo_gym_postprocess_uses_batch_decode():
     assert nemo_gym_result["response"]["output"][1]["generation_str"] == "6 7"
 
 
+@pytest.mark.parametrize("retain_token_audit", [False, True])
+def test_nemo_gym_postprocess_optionally_retains_exact_raw_token_audit(
+    retain_token_audit,
+):
+    class _Tokenizer:
+        def batch_decode(self, batch):
+            return ["decoded"] * len(batch)
+
+    nemo_gym_result = {
+        "response": {
+            "output": [
+                {
+                    "type": "message",
+                    "prompt_token_ids": [11, 12],
+                    "generation_token_ids": [13],
+                    "generation_log_probs": [-0.125],
+                },
+                {
+                    "type": "message",
+                    "prompt_token_ids": [11, 12, 13, 14, 15],
+                    "generation_token_ids": [16, 17],
+                    "generation_log_probs": [-0.25, -0.5],
+                },
+            ]
+        },
+        "responses_create_params": {"input": []},
+    }
+
+    class _MockSelf:
+        cfg = {"retain_token_audit": retain_token_audit}
+
+    result = (
+        NemoGym.__ray_metadata__.modified_class._postprocess_nemo_gym_to_nemo_rl_result(
+            _MockSelf(), {}, nemo_gym_result, _Tokenizer()
+        )
+    )
+
+    expected_audit = {
+        "version": 1,
+        "turns": [
+            {
+                "output_item_index": 0,
+                "prompt_token_ids": [11, 12],
+                "generation_token_ids": [13],
+                "generation_logprobs": [-0.125],
+            },
+            {
+                "output_item_index": 1,
+                "prompt_token_ids": [11, 12, 13, 14, 15],
+                "generation_token_ids": [16, 17],
+                "generation_logprobs": [-0.25, -0.5],
+            },
+        ],
+    }
+    if retain_token_audit:
+        assert result["full_result"]["_nemo_rl_token_audit"] == expected_audit
+        assert (
+            json.loads(json.dumps(result["full_result"]))["_nemo_rl_token_audit"]
+            == expected_audit
+        )
+    else:
+        assert "_nemo_rl_token_audit" not in result["full_result"]
+    assert [message["token_ids"].tolist() for message in result["message_log"]] == [
+        [11, 12],
+        [13],
+        [14, 15],
+        [16, 17],
+    ]
+    assert result["message_log"][1]["generation_logprobs"].tolist() == [-0.125]
+    assert result["message_log"][3]["generation_logprobs"].tolist() == [
+        -0.25,
+        -0.5,
+    ]
+
+
 @pytest.mark.parametrize("include_initial_multimodal_data", [False, True])
 def test_nemo_gym_dedup_redacts_initial_images_from_actor_return(
     include_initial_multimodal_data,
