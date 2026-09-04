@@ -1,0 +1,202 @@
+defaults:
+  # Keep the current SingleController schema and Lightning AutoModel recipe in
+  # one resolved config. The child overrides the legacy/sync values that the
+  # DAPO parent reintroduces below.
+  - ../../grpo_math_1B_megatron_single_controller.yaml
+  - dapo-nanov3.5-30BA3B-4n8g-automodel.yaml
+
+# One SciProbe Harbor task, eight on-policy generations, and one GRPO update on
+# one four-GPU GB200/GB300 node. SCIPROBE_HARBOR_BANK_DIR is the in-container
+# bank root containing train.jsonl and tasks/.
+grpo:
+  # SingleController reads async_rl and rejects the legacy async block.
+  async_grpo: null
+  num_prompts_per_step: 1
+  num_generations_per_prompt: 8
+  max_rollout_turns: 1
+  max_num_epochs: 1
+  max_num_steps: 1
+  val_at_start: false
+  val_at_end: false
+  val_period: 0
+  max_val_samples: null
+  use_dynamic_sampling: false
+  batch_multiplier: 1
+  overlong_filtering: false
+  normalize_rewards: true
+  use_leave_one_out_baseline: true
+  reward_scaling:
+    enabled: false
+  reward_shaping:
+    enabled: false
+  seq_logprob_error_threshold: 2
+
+async_rl:
+  sampler:
+    name: in_order
+    max_lookahead_versions: 1
+  min_groups_for_streaming_train: 1
+  max_inflight_prompts: 1
+  max_buffered_rollouts: 8
+  rollout_failure:
+    # Infra failures retry, then fail the run. They are never converted into
+    # trainable reward-zero samples and no prompt may be silently dropped.
+    max_infra_attempts_per_prompt: 5
+    max_data_attempts_per_prompt: 2
+    max_skipped_prompts: 0
+    max_consecutive_dropped_prompts: 0
+    nemo_gym:
+      rollout_timeout_s: null
+      max_row_attempts: 3
+
+loss_fn:
+  use_importance_sampling_correction: false
+  truncated_importance_sampling_type: null
+  truncated_importance_sampling_ratio: null
+  ratio_clip_c: null
+  force_on_policy_ratio: true
+
+checkpointing:
+  enabled: true
+  checkpoint_dir: results/sciprobe-lightning-harbor-canary
+  metric_name: null
+  keep_top_k: 1
+  save_period: 1
+  checkpoint_must_save_by: 00:00:50:00
+  save_optimizer: false
+  save_data_plane: true
+
+policy:
+  train_global_batch_size: 8
+  train_micro_batch_size: 1
+  logprob_batch_size: 1
+  tokenizer:
+    chat_template_kwargs:
+      enable_thinking: true
+      truncate_history_thinking: false
+  # Preserve enough room for Harbor's multi-turn trajectory while retaining
+  # the single-node settings validated by the earlier Lightning canary.
+  max_total_sequence_length: 12288
+  make_sequence_length_divisible_by: 64
+  scheduler:
+    - name: torch.optim.lr_scheduler.ConstantLR
+      kwargs:
+        factor: 1.0
+        total_iters: 1
+    - milestones: []
+  dtensor_cfg:
+    # SingleController disaggregates generation. Split the four-GPU node 2+2:
+    # the eight-sample train batch divides evenly over two training ranks.
+    expert_parallel_size: 2
+    env_vars:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:False
+    automodel_kwargs:
+      # The Lightning checkpoint carries MTP tensors, but this one-step canary
+      # trains the policy path only, matching the validated 1n4g setup.
+      num_nextn_predict_layers: 0
+      backend:
+        dispatcher: hybridep
+  dynamic_batching:
+    enabled: false
+  generation:
+    max_new_tokens: 8192
+    temperature: 0.7
+    top_p: 1.0
+    top_k: null
+    stop_token_ids: null
+    stop_strings: null
+    vllm_cfg:
+      async_engine: true
+      expose_http_server: true
+      tensor_parallel_size: 2
+      gpu_memory_utilization: 0.5
+      enforce_eager: true
+      reasoning_parser_plugin: nemo_rl/models/generation/vllm/reasoning_parsers/nano_v3_reasoning_parser.py
+      http_server_serving_chat_kwargs:
+        enable_auto_tools: true
+        tool_parser: qwen3_coder
+        reasoning_parser: nano_v3
+    colocated:
+      enabled: false
+      resources:
+        gpus_per_node: 2
+        num_nodes: 1
+    vllm_kwargs:
+      mamba_ssm_cache_dtype: float32
+
+data:
+  _override_: true
+  max_input_seq_length: null
+  shuffle: false
+  num_workers: 1
+  use_multiple_dataloader: false
+  train:
+    # SciProbe exports exactly one row per probe. The eight GRPO attempts come
+    # from num_generations_per_prompt; do not duplicate rows in this file.
+    dataset_name: NemoGymDataset
+    data_path: ${oc.env:SCIPROBE_HARBOR_BANK_DIR}/train.jsonl
+  validation: null
+  default:
+    dataset_name: NemoGymDataset
+    env_name: nemo_gym
+    prompt_file: null
+    system_prompt_file: null
+    processor: nemo_gym_data_processor
+
+env:
+  _override_: true
+  should_use_nemo_gym: true
+  should_log_nemo_gym_responses: false
+  should_mask_flagged_samples: true
+  nemo_gym:
+    nemo_gym_log_dir: results/sciprobe-lightning-harbor-canary/nemo-gym
+    # The container's prebuilt Harbor-agent service venv must include the
+    # landed SciProbe adapter and typed-failure contract.
+    skip_venv_if_present: true
+    num_gpu_nodes: 0
+    port_range_low: 5000
+    port_range_high: 5999
+    invalid_tool_call_patterns:
+      - <tool_call>
+      - </tool_call>
+      - <function_call>
+      - </function_call>
+    thinking_tags:
+      - <think>
+      - </think>
+    config_paths:
+      - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+      - responses_api_agents/harbor_agent/configs/harbor_agent_sciprobe.yaml
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          num_workers: 1
+          chat_template_kwargs:
+            enable_thinking: true
+            truncate_history_thinking: false
+          sequential_reasoning_allowed: false
+    harbor_agent:
+      responses_api_agents:
+        harbor_agent:
+          concurrency: 8
+          harbor_agent_kwargs:
+            model_info:
+              max_input_tokens: ${policy.max_total_sequence_length}
+              max_output_tokens: ${policy.generation.max_new_tokens}
+
+logger:
+  log_dir: results/sciprobe-lightning-harbor-canary/logs
+  wandb_enabled: true
+  tensorboard_enabled: true
+  wandb:
+    project: sciprobe
+    name: lightning-harbor-canary
+    mode: offline
+    log_nemo_gym_full_result_tables: true
+
+data_plane:
+  enabled: true
+
+cluster:
+  gpus_per_node: 4
+  num_nodes: 1
