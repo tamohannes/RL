@@ -54,7 +54,15 @@ class SciProbeDefinition(BaseModel):
 
 
 class SciProbeChecksConfig(BaseResourcesServerConfig):
-    checker_timeout_s: float = 10.0
+    #: Outer bound, enforced here. Keep it above checker_process_timeout_s so the inner
+    #: limit fires first and reports which probe and why, instead of a bare timeout.
+    checker_timeout_s: float = 150.0
+    #: Inner bound, passed to grader_runner and applied to one checks.py run.
+    checker_process_timeout_s: float = 120.0
+    #: Interpreter that runs checks.py. Empty means this process. Most probes recompute
+    #: their gold with numpy, pandas, scipy or R, which the Gym venv does not carry, so
+    #: point this at the grading environment.
+    checker_python: str = ""
     auth_token_env_var: str = "SCIPROBE_VERIFIER_TOKEN"
     auth_header_name: str = "X-SciProbe-Verifier-Token"
     probes: dict[str, SciProbeDefinition]
@@ -88,10 +96,13 @@ class SciProbeChecksVerifyResponse(BaseVerifyResponse):
 
 
 async def _run_hidden_checker(
-    definition: SciProbeDefinition, answer: Any, timeout_s: float
+    definition: SciProbeDefinition,
+    answer: Any,
+    timeout_s: float,
+    checker_python: str = "",
+    checker_process_timeout_s: float | None = None,
 ) -> dict[str, Any]:
-    process = await asyncio.create_subprocess_exec(
-        sys.executable,
+    argv = [
         str(RUNNER_PATH),
         "--probe-root",
         definition.root,
@@ -99,6 +110,14 @@ async def _run_hidden_checker(
         definition.checks_sha256,
         "--data-tree-sha256",
         definition.data_tree_sha256,
+    ]
+    if checker_python:
+        argv += ["--checker-python", checker_python]
+    if checker_process_timeout_s is not None:
+        argv += ["--checker-timeout", str(checker_process_timeout_s)]
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        *argv,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -183,6 +202,8 @@ class SciProbeChecksResourcesServer(SimpleResourcesServer):
             definition,
             answer,
             self.config.checker_timeout_s,
+            self.config.checker_python,
+            self.config.checker_process_timeout_s,
         )
         check_results = grader_result["checks"]
 

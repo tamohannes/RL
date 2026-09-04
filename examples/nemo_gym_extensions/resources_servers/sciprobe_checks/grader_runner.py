@@ -25,14 +25,35 @@ import sys
 import tempfile
 from pathlib import Path
 
+#: The old hardcoded 8s was below what two probes need: one takes 16.6s to 47s and
+#: another 9.6s to 23.9s, so they failed closed regardless of the environment.
+DEFAULT_CHECKER_TIMEOUT_S = 120.0
+
+#: A checker that cannot run is not a wrong answer. If checks.py fails to import a
+#: package or cannot find a binary or a data file, scoring 0 would charge the model for
+#: our environment. Under GRPO that probe then becomes permanently unsolvable and drags
+#: the gradient every step it appears, while looking exactly like a hard probe. Those
+#: cases are reported as infra_error and raised; only a genuine exception from check()
+#: on the submitted answer counts as a rejection.
 CHECK_RUNNER = """import json, sys
 sys.path.insert(0, '.')
-import checks
+INFRA = (ImportError, FileNotFoundError, NotADirectoryError, PermissionError, MemoryError)
+def _fmt(exc):
+    return '%s: %s' % (type(exc).__name__, exc)
+try:
+    import checks
+except BaseException as exc:
+    print(json.dumps({'answer': {'checks': None, 'infra_error': _fmt(exc)}}))
+    raise SystemExit(0)
 ans = json.load(open('_answer.json'))
 try:
     raw = checks.check(ans)
+except INFRA as exc:
+    out = {'checks': None, 'infra_error': _fmt(exc)}
+except OSError as exc:
+    out = {'checks': None, 'infra_error': _fmt(exc)}
 except Exception as exc:
-    out = {'checks': None, 'answer_rejected': '%s: %s' % (type(exc).__name__, exc)}
+    out = {'checks': None, 'answer_rejected': _fmt(exc)}
 else:
     try:
         out = {'checks': [[str(n), bool(v)] for n, v in raw]}
@@ -101,6 +122,20 @@ def main() -> None:
     parser.add_argument("--probe-root", type=Path, required=True)
     parser.add_argument("--checks-sha256", required=True)
     parser.add_argument("--data-tree-sha256", required=True)
+    parser.add_argument(
+        "--checker-python",
+        default=sys.executable,
+        help=(
+            "interpreter that runs the probe's checks.py; defaults to this process. "
+            "Point it at the grading environment when checks.py needs the science stack."
+        ),
+    )
+    parser.add_argument(
+        "--checker-timeout",
+        type=float,
+        default=DEFAULT_CHECKER_TIMEOUT_S,
+        help="seconds allowed for one checks.py run (default %(default)s)",
+    )
     args = parser.parse_args()
 
     probe_root = args.probe_root.resolve(strict=True)
@@ -131,12 +166,12 @@ def main() -> None:
         (temp_root / "_answer.json").write_text(json.dumps(answer), encoding="utf-8")
         (temp_root / "_run_checks.py").write_text(CHECK_RUNNER, encoding="utf-8")
         completed = subprocess.run(
-            [sys.executable, str(temp_root / "_run_checks.py")],
+            [args.checker_python, str(temp_root / "_run_checks.py")],
             cwd=temp_root,
             capture_output=True,
             text=True,
             check=False,
-            timeout=8,
+            timeout=args.checker_timeout,
         )
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout).strip()
@@ -149,6 +184,10 @@ def main() -> None:
     except (json.JSONDecodeError, KeyError, TypeError) as error:
         raise RuntimeError("checks.py process returned an invalid envelope") from error
 
+    if outcome.get("infra_error"):
+        raise RuntimeError(
+            "checks.py could not run in this environment: " + str(outcome["infra_error"])
+        )
     if outcome.get("answer_rejected"):
         status = "answer_rejected"
         results = [["answer_schema", False]]
