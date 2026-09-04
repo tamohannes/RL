@@ -53,6 +53,7 @@ class WandbConfig(TypedDict):
     project: NotRequired[str]
     name: NotRequired[str]
     entity: NotRequired[str]
+    mode: NotRequired[str]
     # Log complete NeMo Gym result payloads as W&B Tables. These payloads can be
     # very large, so the recommended default is false.
     log_nemo_gym_full_result_tables: NotRequired[bool]

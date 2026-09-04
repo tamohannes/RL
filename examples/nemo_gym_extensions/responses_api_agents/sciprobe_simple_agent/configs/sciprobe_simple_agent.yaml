@@ -1,0 +1,21 @@
+ns_tools_simple_agent:
+  responses_api_agents:
+    sciprobe_simple_agent:
+      entrypoint: app.py
+      max_steps: 50
+      resources_server:
+        type: resources_servers
+        name: ns_tools
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      capability_signing_key_env_var: SCIPROBE_CAPABILITY_SIGNING_KEY
+      capability_header_name: X-SciProbe-Rollout-Capability
+      capability_ttl_seconds: 300
+      trusted_ingress_token_env_var: SCIPROBE_TRUSTED_INGRESS_TOKEN
+      trusted_ingress_header_name: X-SciProbe-Trusted-Ingress
+      datasets:
+        - name: example
+          type: example
+          license: Apache 2.0
+          jsonl_fpath: resources_servers/ns_tools/data/example.jsonl

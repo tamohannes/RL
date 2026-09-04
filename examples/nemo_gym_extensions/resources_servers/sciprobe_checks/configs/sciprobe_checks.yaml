@@ -1,0 +1,24 @@
+sciprobe_checks:
+  resources_servers:
+    sciprobe_checks:
+      entrypoint: app.py
+      checker_timeout_s: 10.0
+      auth_token_env_var: SCIPROBE_VERIFIER_TOKEN
+      auth_header_name: X-SciProbe-Verifier-Token
+      probes:
+        "q3:c013:d0":
+          root: ${oc.env:SCIPROBE_PRIVATE_PROBE_ROOT,/workspace/sciprobe-private/q3-c013-d0}
+          checks_sha256: 38fdcd62becccf79f602aeabca8aaf318b731ea3e8c80df668895026ce6bde34
+          data_tree_sha256: 16713f67f959a4c276baea508c1fb64fa54bf622f4e14b0b4def77d6c152a590
+          source_ref: sciprobe-hcls775-hard4-paid-v8/nls_mb_hard4_v1/smoke/authoring-grounded-v1/q3/c013/d0
+          answer_keys:
+            - n_samples
+            - total_aligned_reads
+            - total_modified_reads
+            - mean_modified_pct
+            - max_modified_pct
+            - max_modified_sample
+      domain: agent
+      verified: false
+      description: Execution-grounded SciProbe checks over a hidden verifier
+      value: Grade a flat JSON answer by recomputing all checks from mounted data

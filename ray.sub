@@ -23,6 +23,7 @@
 
 
 set -eoux pipefail
+umask 077
 
 # Record job-start epoch so Python can measure pre-Python overhead
 export NRL_JOB_START_EPOCH=$(date +%s.%N)
@@ -33,9 +34,157 @@ log_phase() {
 }
 log_phase "ray.sub started (job=${SLURM_JOB_ID:-?} nodes=${SLURM_JOB_NUM_NODES:-?} partition=${SLURM_JOB_PARTITION:-?} node=$(hostname))"
 
+# Scan the exact secret bytes without printing the token or a digest of it.
+_nrl_scan_ray_auth_logs() {
+  local token_path=${1:-${RAY_AUTH_TOKEN_PATH:-}}
+  local scan_root=${2:-${LOG_DIR:-}}
+  if [[ -z "$token_path" || ! -f "$token_path" ]]; then
+    echo "[NRL_SECURITY] Ray auth log scan failed: token file is unavailable" >&2
+    return 1
+  fi
+  if [[ -z "$scan_root" || ! -d "$scan_root" ]]; then
+    echo "[NRL_SECURITY] Ray auth log scan failed: scan root is unavailable" >&2
+    return 1
+  fi
+  python3 - "$token_path" "$scan_root" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+token_path = Path(sys.argv[1]).resolve(strict=True)
+scan_root = Path(sys.argv[2])
+token = token_path.read_bytes()
+if not token:
+    raise RuntimeError("Ray auth token file is empty")
+
+files_scanned = 0
+bytes_scanned = 0
+leaks = []
+overlap_size = len(token) - 1
+for candidate in sorted(scan_root.rglob("*")):
+    try:
+        candidate_stat = candidate.lstat()
+    except FileNotFoundError:
+        continue
+    if stat.S_ISLNK(candidate_stat.st_mode) or not stat.S_ISREG(candidate_stat.st_mode):
+        continue
+    try:
+        if candidate.resolve(strict=True) == token_path:
+            continue
+    except FileNotFoundError:
+        continue
+    files_scanned += 1
+    previous = b""
+    try:
+        with candidate.open("rb") as stream:
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                bytes_scanned += len(chunk)
+                combined = previous + chunk
+                if token in combined:
+                    leaks.append(str(candidate))
+                    break
+                previous = combined[-overlap_size:]
+    except (FileNotFoundError, PermissionError):
+        continue
+
+if leaks:
+    raise RuntimeError("Ray auth token leaked into log files: " + ", ".join(leaks))
+print(
+    "[NRL_SECURITY] Ray auth log scan passed "
+    f"(files={files_scanned} bytes={bytes_scanned} leaks=0)"
+)
+PY
+}
+
+# Wait for the exact per-job marker instead of treating a stale or briefly
+# invisible path as ready. Callers remain fail-closed after the bounded wait.
+_nrl_wait_for_shared_fs_canary() {
+  local canary_path=$1
+  local expected_job_id=$2
+  local role=$3
+  local timeout_seconds=${4:-30}
+  local deadline=$((SECONDS + timeout_seconds))
+  local observed=""
+
+  while (( SECONDS < deadline )); do
+    if [[ -r "$canary_path" ]]; then
+      IFS= read -r observed < "$canary_path" || observed=""
+      if [[ "$observed" == "$expected_job_id" ]]; then
+        echo "[NRL_SECURITY] Shared-FS canary verified for $role."
+        return 0
+      fi
+    fi
+    sleep 1
+  done
+
+  echo "[ERROR] $canary_path did not contain the expected job marker for $role within ${timeout_seconds}s; LOG_DIR must be mounted from a shared filesystem." >&2
+  return 1
+}
+
+_nrl_stop_background_sruns() {
+  [[ -n "${LOG_DIR:-}" && -d "${LOG_DIR:-}" ]] && touch "$LOG_DIR/ENDED" 2>/dev/null || true
+  declare -p SRUN_PIDS >/dev/null 2>&1 || return 0
+
+  local name pid watchdog
+  local -a live_pids=()
+  for name in "${!SRUN_PIDS[@]}"; do
+    pid=${SRUN_PIDS[$name]}
+    if kill -0 "$pid" 2>/dev/null; then
+      live_pids+=("$pid")
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  done
+  [[ ${#live_pids[@]} -gt 0 ]] || return 0
+
+  # Bound teardown even if an srun client ignores TERM. The parent then waits
+  # every exact child PID, so no Ray/sandbox writer can race the secret scan.
+  (
+    sleep 30
+    for pid in "${live_pids[@]}"; do
+      kill -KILL "$pid" 2>/dev/null || true
+    done
+  ) &
+  watchdog=$!
+  for pid in "${live_pids[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
+  kill -TERM "$watchdog" 2>/dev/null || true
+  wait "$watchdog" 2>/dev/null || true
+}
+
 # Log a final marker on exit; trap TERM/HUP/INT too so a scancel/time-limit kill is still stamped.
-_nrl_log_exit() { local rc=$?; trap - EXIT; log_phase "ray.sub exiting (exit_code=$rc)"; exit $rc; }
-trap _nrl_log_exit EXIT TERM HUP INT
+_nrl_log_exit() {
+  local rc=${1:-$?}
+  trap - EXIT TERM HUP INT
+  set +e
+  _nrl_stop_background_sruns
+  if [[ "${RAY_AUTH_MODE:-}" == "token" ]]; then
+    if ! _nrl_scan_ray_auth_logs; then
+      rc=1
+    fi
+    if [[ -z "${RAY_AUTH_TOKEN_PATH:-}" ]] \
+      || ! rm -f -- "$RAY_AUTH_TOKEN_PATH" \
+      || [[ -e "$RAY_AUTH_TOKEN_PATH" ]]; then
+      echo "[NRL_SECURITY] Failed to remove the Ray auth token file" >&2
+      rc=1
+    fi
+    if [[ -z "${RAY_AUTH_DIR:-}" ]] \
+      || ! rmdir -- "$RAY_AUTH_DIR" 2>/dev/null; then
+      echo "[NRL_SECURITY] Failed to remove the Ray auth directory" >&2
+      rc=1
+    fi
+  fi
+  log_phase "ray.sub exiting (exit_code=$rc)"
+  exit "$rc"
+}
+trap _nrl_log_exit EXIT
+trap '_nrl_log_exit 143' TERM
+trap '_nrl_log_exit 129' HUP
+trap '_nrl_log_exit 130' INT
 
 ########################################################
 # Function to detect if SLURM cluster uses GRES
@@ -217,6 +366,16 @@ mkdir -p $LOG_DIR
 echo "$SLURM_JOB_ID" > "$LOG_DIR/.shared_fs_canary"
 log_phase "shared-FS log dir ready ($LOG_DIR)"
 
+# The trusted Ray containers must read command/auth files and write readiness
+# markers in LOG_DIR. Mount that exact directory even when the caller only
+# supplied a code/model mount; the untrusted model sandbox uses a separate,
+# explicit mount allowlist below and never receives this mount.
+if [[ -n "$MOUNTS" ]]; then
+  MOUNTS+=",$LOG_DIR:$LOG_DIR"
+else
+  MOUNTS="$LOG_DIR:$LOG_DIR"
+fi
+
 # Write setup commands to a file so they can be executed inside each container
 # without heredoc escaping surprises.
 SETUP_COMMAND_FILE=""
@@ -238,6 +397,7 @@ fi
 # Number of GPUs per worker node
 GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 DEDICATED_RAY_HEAD=${DEDICATED_RAY_HEAD:-0}
+RAY_LOOPBACK_ONLY=${RAY_LOOPBACK_ONLY:-0}
 case "$DEDICATED_RAY_HEAD" in
   0|1) ;;
   *)
@@ -245,6 +405,60 @@ case "$DEDICATED_RAY_HEAD" in
     exit 1
     ;;
 esac
+case "$RAY_LOOPBACK_ONLY" in
+  0|1) ;;
+  *)
+    echo "Error: RAY_LOOPBACK_ONLY must be 0 or 1, got '$RAY_LOOPBACK_ONLY'." >&2
+    exit 1
+    ;;
+esac
+if [[ "$RAY_LOOPBACK_ONLY" == "1" && "$SLURM_JOB_NUM_NODES" -ne 1 ]]; then
+  echo "Error: RAY_LOOPBACK_ONLY=1 is valid only for a one-node Slurm job." >&2
+  exit 1
+fi
+if [[ "$RAY_LOOPBACK_ONLY" == "1" && "${RAY_DEBUG:-}" == "legacy" ]]; then
+  echo "Error: external Ray debugger is forbidden in loopback-only mode." >&2
+  exit 1
+fi
+
+# The model sandbox shares the node network namespace and can reach loopback.
+# Protect Ray's loopback control plane and worker RPCs with native token
+# authentication. Keep only the file path in process environments; the token
+# value is never stored in a shell variable or argv.
+RAY_AUTH_DIR=""
+if [[ "$RAY_LOOPBACK_ONLY" == "1" ]]; then
+  RAY_AUTH_DIR="$LOG_DIR/.ray-auth"
+  export RAY_AUTH_DIR
+  export RAY_AUTH_TOKEN_PATH="$RAY_AUTH_DIR/token"
+  rm -f -- "$RAY_AUTH_TOKEN_PATH"
+  rmdir -- "$RAY_AUTH_DIR" 2>/dev/null || true
+  python3 - "$RAY_AUTH_DIR" "$RAY_AUTH_TOKEN_PATH" <<'PY'
+import os
+import secrets
+import stat
+import sys
+from pathlib import Path
+
+auth_dir = Path(sys.argv[1])
+token_path = Path(sys.argv[2])
+auth_dir.mkdir(mode=0o700)
+fd = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w", encoding="ascii") as stream:
+    stream.write(secrets.token_hex(32))
+    stream.flush()
+    os.fsync(stream.fileno())
+if stat.S_IMODE(auth_dir.stat().st_mode) != 0o700:
+    raise RuntimeError("Ray auth directory mode is not 0700")
+if stat.S_IMODE(token_path.stat().st_mode) != 0o600:
+    raise RuntimeError("Ray auth token mode is not 0600")
+token = token_path.read_bytes()
+if len(token) != 64 or any(byte not in b"0123456789abcdef" for byte in token):
+    raise RuntimeError("Ray auth token is not exactly 64 lowercase hex bytes")
+PY
+  unset RAY_AUTH_TOKEN
+  export RAY_AUTH_MODE=token
+  echo "[NRL_SECURITY] Ray native token authentication enabled (token file mode 0600)."
+fi
 
 # Detect GRES support and set GRES_ARG
 log_phase "detecting GRES support (sinfo)"
@@ -255,12 +469,18 @@ else
   echo "[INFO] No GRES support detected. Running without --gres flag."
 fi
 
+CONTAINER_WORKDIR=${CONTAINER_WORKDIR:-$SLURM_SUBMIT_DIR}
+
 COMMON_SRUN_ARGS="$GRES_ARG"
 COMMON_SRUN_ARGS+=" --no-container-mount-home"
 COMMON_SRUN_ARGS+=" --mpi=pmix"
 COMMON_SRUN_ARGS+=" --container-mounts=$MOUNTS"
 COMMON_SRUN_ARGS+=" --container-image=$CONTAINER"
-COMMON_SRUN_ARGS+=" --container-workdir=$SLURM_SUBMIT_DIR"
+COMMON_SRUN_ARGS+=" --container-workdir=$CONTAINER_WORKDIR"
+if [[ "$RAY_LOOPBACK_ONLY" == "1" ]]; then
+  # Pyxis image values otherwise take precedence over the Slurm step env.
+  COMMON_SRUN_ARGS+=" --container-env=RAY_AUTH_MODE,RAY_AUTH_TOKEN_PATH"
+fi
 # Pass partition/account explicitly for overlapping srun calls.
 COMMON_SRUN_ARGS+=" -p $SLURM_JOB_PARTITION"
 COMMON_SRUN_ARGS+=" -A $SLURM_JOB_ACCOUNT"
@@ -482,6 +702,21 @@ echo "[INFO] Nodes after hostname sort: ${nodes_array[*]}"
 
 head_node=${nodes_array[0]}
 head_node_ip=${ip_addresses_array[0]}
+WORKER_NODE_IP_ARG=""
+if [[ "$RAY_LOOPBACK_ONLY" == "1" ]]; then
+  # By default Ray rewrites localhost to the real node IP. This upstream flag
+  # enables Ray's local-only path and keeps 127.0.0.1 as the actual bind host.
+  # The one-node guard above is required because this mode rejects workers.
+  unset RAY_REDIS_ADDRESS
+  unset RAY_API_SERVER_ADDRESS
+  unset RAY_DASHBOARD_ADDRESS
+  unset RAY_AGENT_ADDRESS
+  export RAY_ENABLE_WINDOWS_OR_OSX_CLUSTER=0
+  export RAY_ADDRESS="127.0.0.1:${PORT}"
+  head_node_ip="127.0.0.1"
+  WORKER_NODE_IP_ARG="--node-ip-address=127.0.0.1"
+  echo "[INFO] One-node Ray control plane is restricted to 127.0.0.1."
+fi
 
 ip_head=$head_node_ip:$PORT
 
@@ -592,23 +827,39 @@ RAY_RESOURCES+='}'
 export RAY_RESOURCES
 TOPO_PROBE_EOF
 
-# Set up the sandbox ports/signal directory on the shared FS before building the
-# head script, so the head can gate the driver on sandbox readiness. Arbitrary
-# extra mounts are supported via SANDBOX_EXTRA_MOUNTS (e.g. a shared temp dir).
-SANDBOX_PORTS_DIR=""
+# Keep only Slurm-owned sandbox logs on the shared filesystem. The model sandbox
+# gets its own /tmp runtime directory and no writable host-filesystem bridge.
+SANDBOX_LOG_DIR=""
 if [[ -n "${SANDBOX_CONTAINER:-}" ]] && [[ -n "${SANDBOX_COMMAND:-}" ]]; then
-  SANDBOX_PORTS_DIR="$LOG_DIR/sandbox"
-  mkdir -p "$SANDBOX_PORTS_DIR"
+  SANDBOX_LOG_DIR="$LOG_DIR/sandbox"
+  mkdir -p "$SANDBOX_LOG_DIR"
+fi
+SCIPROBE_REQUIRE_SANDBOX_SECCOMP_PREFLIGHT="${SCIPROBE_REQUIRE_SANDBOX_SECCOMP_PREFLIGHT:-0}"
+case "$SCIPROBE_REQUIRE_SANDBOX_SECCOMP_PREFLIGHT" in
+  0|1) ;;
+  *)
+    echo "Error: SCIPROBE_REQUIRE_SANDBOX_SECCOMP_PREFLIGHT must be 0 or 1." >&2
+    exit 1
+    ;;
+esac
+if [[ "$SCIPROBE_REQUIRE_SANDBOX_SECCOMP_PREFLIGHT" == "1" ]]; then
+  if [[ -z "$SANDBOX_LOG_DIR" ]]; then
+    echo "Error: hardened sandbox preflight was required without a sandbox." >&2
+    exit 1
+  fi
+  case ",${SANDBOX_ENV_VARS:-}," in
+    *,SCIPROBE_REQUIRE_SECCOMP_NETWORK_BLOCK=1,*) ;;
+    *)
+      echo "Error: hardened sandbox preflight requires SCIPROBE_REQUIRE_SECCOMP_NETWORK_BLOCK=1 in SANDBOX_ENV_VARS." >&2
+      exit 1
+      ;;
+  esac
 fi
 
 # First we start the head of the ray cluster on one of the physical nodes
 # Give the head node actual resources to make it schedulable
 
 head_cmd=$(cat <<EOF
-if [[ "\${RAY_SUB_DEBUG_ENV:-0}" == "1" ]]; then
-  env | grep -viE '(WANDB_API_KEY|HF_TOKEN|API_KEY|TOKEN|SECRET|PASSWORD)=' || true
-fi
-
 # Turn on pipefail here; it does not carry into this 'bash -c' subshell from the
 # submit host. Without it, 'ray status | grep worker_units | awk ...' exits 0 even
 # when grep matches nothing (awk's status wins), so the '|| echo 0' fallback never
@@ -616,10 +867,44 @@ fi
 # exit codes to stay non-fatal.
 set -o pipefail
 
-# If this node can't see the canary, LOG_DIR is not shared. Fail now instead of
-# waiting forever for signal files the submit host writes but this node can't read.
-if [[ ! -f "$LOG_DIR/.shared_fs_canary" ]]; then
-  echo "[ERROR] $LOG_DIR/.shared_fs_canary not visible on the head node; LOG_DIR must be on a shared filesystem." >&2
+$(declare -f _nrl_scan_ray_auth_logs)
+$(declare -f _nrl_wait_for_shared_fs_canary)
+
+declare -a HEAD_SIDECAR_PIDS=()
+
+# Stop Ray before the trusted head container exits, then scan its node-local
+# session tree while the per-job token still exists. The outer batch process
+# cannot see this /tmp tree, so this is the final writer-complete log gate.
+_nrl_head_exit() {
+  local rc=\${1:-\$?}
+  local pid
+  trap - EXIT TERM HUP INT
+  set +e
+  touch "$LOG_DIR/ENDED" 2>/dev/null || true
+  for pid in "\${HEAD_SIDECAR_PIDS[@]}"; do
+    pkill -TERM -P "\$pid" 2>/dev/null || true
+    kill -TERM "\$pid" 2>/dev/null || true
+  done
+  for pid in "\${HEAD_SIDECAR_PIDS[@]}"; do
+    wait "\$pid" 2>/dev/null || true
+  done
+  if [[ "\${RAY_AUTH_MODE:-}" == "token" ]]; then
+    ray stop --force >/dev/null 2>&1 || rc=1
+    if ! _nrl_scan_ray_auth_logs "\${RAY_AUTH_TOKEN_PATH:-}" /tmp/ray; then
+      rc=1
+    fi
+  fi
+  exit "\$rc"
+}
+trap _nrl_head_exit EXIT
+trap '_nrl_head_exit 143' TERM
+trap '_nrl_head_exit 129' HUP
+trap '_nrl_head_exit 130' INT
+
+# Require the exact current job marker after a bounded visibility wait. Fail
+# instead of waiting forever for signal files the submit host writes.
+if ! _nrl_wait_for_shared_fs_canary \
+  "$LOG_DIR/.shared_fs_canary" "$SLURM_JOB_ID" "head node" 30; then
   touch "$LOG_DIR/ENDED" 2>/dev/null || true
   exit 1
 fi
@@ -628,6 +913,13 @@ fi
 # elapsed counter shares the submit-side timeline.
 log_phase() { local t0="\${NRL_JOB_START_EPOCH:-0}"; echo "[NRL_PHASE][\$(date '+%Y-%m-%dT%H:%M:%S%z')][+\$(( \$(date +%s) - \${t0%.*} ))s] \$*"; }
 log_phase "head container started on \$(hostname)"
+
+if [[ "$RAY_LOOPBACK_ONLY" == "1" ]]; then
+  # A raw token baked into an image would override the job-owned token path.
+  unset RAY_AUTH_TOKEN
+  [[ "\${RAY_AUTH_MODE:-}" == "token" ]]
+  [[ -r "\${RAY_AUTH_TOKEN_PATH:-}" ]]
+fi
 
 exit-dramatically() {
     # Use SIGTERM to forcefully terminate the srun process
@@ -650,6 +942,7 @@ monitor-sidecar() {
   done
 }
 monitor-sidecar &
+HEAD_SIDECAR_PIDS+=(\$!)
 
 # Background process to sync ray logs every $RAY_LOG_SYNC_FREQUENCY seconds
 log-sync-sidecar() {
@@ -681,6 +974,7 @@ log-sync-sidecar() {
   done
 }
 log-sync-sidecar &
+HEAD_SIDECAR_PIDS+=(\$!)
 
 # Background process that publishes the live worker_units count to a file on the
 # shared FS, which the submit host reads to track how many workers have joined.
@@ -699,6 +993,7 @@ ray-status-sidecar() {
   done
 }
 ray-status-sidecar &
+HEAD_SIDECAR_PIDS+=(\$!)
 
 # Patch nsight.py before starting Ray head
 sed -i 's/context\.py_executable = " "\.join(self\.nsight_cmd) + " python"/context.py_executable = " ".join(self.nsight_cmd) + f" {context.py_executable}"/g' /opt/nemo_rl_venv/lib64/python*/site-packages/ray/_private/runtime_env/nsight.py
@@ -719,7 +1014,7 @@ fi
 # Clear MPI/PMIx/SLURM env vars inherited from the srun launcher so TRT-LLM's
 # MPI_Init (in the ray daemon child process below) starts clean.
 # NOTE: keep this after topology_probe.sh, which reads SLURM_TOPOLOGY_ADDR/SLURM_PROCID.
-for v in \$(env | awk -F= '/^(PMI|PMIX|MPI|OMPI|SLURM)_/{print \$1}'); do
+for v in \$(compgen -e | awk '/^(PMI|PMIX|MPI|OMPI|SLURM)_/'); do
     unset "\$v"
 done
 
@@ -787,9 +1082,10 @@ if [[ -n "$DRIVER_COMMAND_FILE" ]]; then
   WORKER_DEADLINE=\$((SECONDS + 1800))
   SANDBOX_DEADLINE=\$((SECONDS + 600))
   workers_ready=0
-  # Each sandbox task touches SANDBOX_READY_<hostname> when its port comes up (see
-  # the sandbox srun below). With no sandbox configured, count it ready up front.
-  if [[ -n "$SANDBOX_PORTS_DIR" ]]; then sandbox_ready=0; else sandbox_ready=1; fi
+  # Each sandbox task writes fixed readiness markers to its Slurm-owned stdout
+  # log. Hardened callers require both the exact-image seccomp attestation and
+  # the live service marker. With no sandbox configured, count it ready up front.
+  if [[ -n "$SANDBOX_LOG_DIR" ]]; then sandbox_ready=0; else sandbox_ready=1; fi
   while true; do
     if [[ "\$workers_ready" -eq 0 ]]; then
       worker_units=\$(ray status 2>/dev/null | grep "worker_units" | awk -F'[/. ]' '{print \$4}' || echo 0)
@@ -800,7 +1096,15 @@ if [[ -n "$DRIVER_COMMAND_FILE" ]]; then
       fi
     fi
     if [[ "\$sandbox_ready" -eq 0 ]]; then
-      ready_count=\$(ls -1 "$SANDBOX_PORTS_DIR"/SANDBOX_READY_* 2>/dev/null | wc -l)
+      ready_count=0
+      for sandbox_log in "$SANDBOX_LOG_DIR"/sandbox-[0-9]*.log; do
+        if [[ -f "\$sandbox_log" ]] && grep -Fqx '[SCIPROBE_SANDBOX_READY]' "\$sandbox_log"; then
+          if [[ "$SCIPROBE_REQUIRE_SANDBOX_SECCOMP_PREFLIGHT" == "0" ]] \
+            || grep -Fqx '[SCIPROBE_SANDBOX_SECCOMP_PREFLIGHT_OK]' "\$sandbox_log"; then
+            ready_count=\$((ready_count + 1))
+          fi
+        fi
+      done
       echo "[INFO][\$(date '+%Y-%m-%dT%H:%M:%S%z')] Sandbox ready on \$ready_count/$SLURM_JOB_NUM_NODES nodes..."
       if [[ "\$ready_count" -ge "$SLURM_JOB_NUM_NODES" ]]; then
         sandbox_ready=1
@@ -845,21 +1149,27 @@ EOF
 # Worker nodes connect to the head. They're launched with a single batched srun
 # below; each task discovers its identity at runtime via SLURM_PROCID/SLURMD_NODENAME.
 worker_cmd=$(cat <<EOF
-if [[ "\${RAY_SUB_DEBUG_ENV:-0}" == "1" ]]; then
-  env | grep -viE '(WANDB_API_KEY|HF_TOKEN|API_KEY|TOKEN|SECRET|PASSWORD)=' || true
-fi
 echo "[INFO] Worker \$SLURM_PROCID on node \$SLURMD_NODENAME"
 
-# Fail fast if LOG_DIR is not actually shared with the submit host -- the worker
-# gates on STARTED_RAY_HEAD and other signal files that would otherwise never appear.
-if [[ ! -f "$LOG_DIR/.shared_fs_canary" ]]; then
-  echo "[ERROR] Worker \$SLURM_PROCID: $LOG_DIR/.shared_fs_canary not visible; LOG_DIR must be on a shared filesystem." >&2
+$(declare -f _nrl_wait_for_shared_fs_canary)
+
+# Fail closed if LOG_DIR is not shared with the submit host; the worker gates on
+# STARTED_RAY_HEAD and other signal files that would otherwise never appear.
+if ! _nrl_wait_for_shared_fs_canary \
+  "$LOG_DIR/.shared_fs_canary" "$SLURM_JOB_ID" "worker \$SLURM_PROCID" 30; then
   exit 1
 fi
 
 # Phase markers inside the container (see head container).
 log_phase() { local t0="\${NRL_JOB_START_EPOCH:-0}"; echo "[NRL_PHASE][\$(date '+%Y-%m-%dT%H:%M:%S%z')][+\$(( \$(date +%s) - \${t0%.*} ))s] \$*"; }
 log_phase "worker \$SLURM_PROCID container started on \$(hostname)"
+
+if [[ "$RAY_LOOPBACK_ONLY" == "1" ]]; then
+  # A raw token baked into an image would override the job-owned token path.
+  unset RAY_AUTH_TOKEN
+  [[ "\${RAY_AUTH_MODE:-}" == "token" ]]
+  [[ -r "\${RAY_AUTH_TOKEN_PATH:-}" ]]
+fi
 
 exit-dramatically() {
     # Use SIGTERM to forcefully terminate the srun process
@@ -921,7 +1231,7 @@ source $LOG_DIR/topology_probe.sh
 # Clear MPI/PMIx/SLURM env vars inherited from the srun launcher so TRT-LLM's
 # MPI_Init (in the ray daemon child process below) starts clean.
 # NOTE: keep this after topology_probe.sh, which reads SLURM_TOPOLOGY_ADDR/SLURM_PROCID.
-for v in \$(env | awk -F= '/^(PMI|PMIX|MPI|OMPI|SLURM)_/{print \$1}'); do
+for v in \$(compgen -e | awk '/^(PMI|PMIX|MPI|OMPI|SLURM)_/'); do
     unset "\$v"
 done
 
@@ -959,6 +1269,7 @@ while [[ \$count -lt $WORKER_NUM_RETRIES ]]; do
 ray start --address "$ip_head" \
           --disable-usage-stats \
           --resources="\$RAY_RESOURCES" \
+          $WORKER_NODE_IP_ARG \
           --min-worker-port=${MIN_WORKER_PORT} \
           --max-worker-port=${MAX_WORKER_PORT} \
           \
@@ -988,30 +1299,79 @@ bash -n <(printf '%s' "$worker_cmd") || { echo "[FATAL] Worker script has syntax
 ########################################################
 # Optional sandbox sidecar for NeMo-Skills-backed Gym resources.
 # Launched first so it boots in parallel with the Ray head/workers. Each per-node
-# task starts the sandbox, polls its local port, and on success touches
-# SANDBOX_READY_<hostname> so the head can gate the driver on all instances.
+# task starts the sandbox, polls its local port, and on success writes a fixed
+# readiness marker to its Slurm-owned log so the head can gate the driver.
 ########################################################
 export SLURM_MASTER_NODE=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n1)
 SANDBOX_PORT="${NEMO_SKILLS_SANDBOX_PORT:-6000}"
 
 SANDBOX_BASE_PORT="${SANDBOX_BASE_PORT:-6001}"
 if [[ -n "${SANDBOX_CONTAINER:-}" ]] && [[ -n "${SANDBOX_COMMAND:-}" ]]; then
-  SANDBOX_MOUNTS="$SANDBOX_PORTS_DIR:$SANDBOX_PORTS_DIR"
+  SANDBOX_RUNTIME_DIR="/tmp/sciprobe-sandbox-${SLURM_JOB_ID}"
+  SANDBOX_CONTAINER_ARGS=(
+    --container-image="$SANDBOX_CONTAINER"
+    --no-container-mount-home
+  )
   if [[ -n "${SANDBOX_EXTRA_MOUNTS:-}" ]]; then
-    SANDBOX_MOUNTS="${SANDBOX_EXTRA_MOUNTS},${SANDBOX_MOUNTS}"
+    if [[ -n "${RAY_AUTH_TOKEN_PATH:-}" ]]; then
+      auth_token_real=$(realpath -m "$RAY_AUTH_TOKEN_PATH")
+      IFS=',' read -r -a sandbox_mount_specs <<< "$SANDBOX_EXTRA_MOUNTS"
+      for sandbox_mount_spec in "${sandbox_mount_specs[@]}"; do
+        sandbox_mount_source="${sandbox_mount_spec%%:*}"
+        sandbox_mount_source_real=$(realpath -m "$sandbox_mount_source")
+        if [[ "$sandbox_mount_source_real" == "/" \
+          || "$auth_token_real" == "$sandbox_mount_source_real" \
+          || "$auth_token_real" == "$sandbox_mount_source_real"/* ]]; then
+          echo "Error: SANDBOX_EXTRA_MOUNTS must not expose the Ray auth token path." >&2
+          exit 1
+        fi
+      done
+    fi
+    SANDBOX_CONTAINER_ARGS+=(--container-mounts="$SANDBOX_EXTRA_MOUNTS")
   fi
 
-  SANDBOX_EXPORTS="ALL,SANDBOX_PORTS_DIR=$SANDBOX_PORTS_DIR,SANDBOX_WORKER_BASE_PORT=$SANDBOX_BASE_PORT,NGINX_PORT=$SANDBOX_PORT"
+  # Do not inherit the training/submit environment. Model-authored code runs in
+  # this container, so ALL would expose unrelated paths, commands, and secrets.
+  # Slurm always supplies its own SLURM_* variables; list only sandbox inputs here.
+  SANDBOX_EXPORTS="SANDBOX_PORTS_DIR=$SANDBOX_RUNTIME_DIR,SANDBOX_WORKER_BASE_PORT=$SANDBOX_BASE_PORT,NGINX_PORT=$SANDBOX_PORT"
+  SANDBOX_CONTAINER_ENV_NAMES="SANDBOX_PORTS_DIR,SANDBOX_WORKER_BASE_PORT,NGINX_PORT"
   if [[ -n "${SANDBOX_ENV_VARS:-}" ]]; then
     SANDBOX_EXPORTS="${SANDBOX_EXPORTS},${SANDBOX_ENV_VARS}"
+    IFS=',' read -r -a sandbox_env_assignments <<< "${SANDBOX_ENV_VARS}"
+    for sandbox_assignment in "${sandbox_env_assignments[@]}"; do
+      if [[ "${sandbox_assignment}" != *=* ]]; then
+        echo "Error: SANDBOX_ENV_VARS entries must be NAME=VALUE assignments." >&2
+        exit 1
+      fi
+      sandbox_name="${sandbox_assignment%%=*}"
+      if ! [[ "${sandbox_name}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        echo "Error: invalid environment name in SANDBOX_ENV_VARS: '${sandbox_name}'." >&2
+        exit 1
+      fi
+      case "$sandbox_name" in
+        RAY_AUTH_MODE|RAY_AUTH_TOKEN|RAY_AUTH_TOKEN_PATH)
+          echo "Error: SANDBOX_ENV_VARS must not expose Ray authentication settings." >&2
+          exit 1
+          ;;
+      esac
+      case ",${SANDBOX_CONTAINER_ENV_NAMES}," in
+        *",${sandbox_name},"*) ;;
+        *) SANDBOX_CONTAINER_ENV_NAMES+=",${sandbox_name}" ;;
+      esac
+    done
   fi
+  # Pyxis image environment values otherwise take precedence over the Slurm
+  # step environment. Explicitly forward each allowlisted name so the hardened
+  # sidecar cannot silently fall back to image defaults (for example workers >1
+  # or an image PYTHONPATH that bypasses the seccomp hook).
+  SANDBOX_CONTAINER_ARGS+=(--container-env="${SANDBOX_CONTAINER_ENV_NAMES}")
 
-  echo "[INFO] Starting sandbox sidecars on all allocated nodes (ports_dir=$SANDBOX_PORTS_DIR, port=$SANDBOX_PORT, base_port=$SANDBOX_BASE_PORT)..."
-  srun --output "$SANDBOX_PORTS_DIR/sandbox-%t.log" \
-    --error "$SANDBOX_PORTS_DIR/sandbox-%t.log" \
-    --container-image="$SANDBOX_CONTAINER" \
-    --container-mounts="$SANDBOX_MOUNTS" \
-    --no-container-mount-home \
+  echo "[INFO] Starting sandbox sidecars on all allocated nodes (runtime_dir=$SANDBOX_RUNTIME_DIR, port=$SANDBOX_PORT, base_port=$SANDBOX_BASE_PORT)..."
+  # Slurm opens --output and --error independently. Pointing both at one path
+  # lets later stderr overwrite early stdout, including security attestations.
+  srun --output "$SANDBOX_LOG_DIR/sandbox-%t.log" \
+    --error "$SANDBOX_LOG_DIR/sandbox-stderr-%t.log" \
+    "${SANDBOX_CONTAINER_ARGS[@]}" \
     --mpi=pmix \
     -A "$SLURM_JOB_ACCOUNT" \
     -p "$SLURM_JOB_PARTITION" \
@@ -1022,6 +1382,7 @@ if [[ -n "${SANDBOX_CONTAINER:-}" ]] && [[ -n "${SANDBOX_COMMAND:-}" ]]; then
     --ntasks-per-node=1 \
     --export="$SANDBOX_EXPORTS" \
     bash -xc '
+      unset RAY_AUTH_MODE RAY_AUTH_TOKEN RAY_AUTH_TOKEN_PATH
       ('"$SANDBOX_COMMAND"') &
       SANDBOX_PID=$!
       deadline=$((SECONDS + 300))
@@ -1036,8 +1397,17 @@ if [[ -n "${SANDBOX_CONTAINER:-}" ]] && [[ -n "${SANDBOX_COMMAND:-}" ]]; then
         fi
         sleep 2
       done
-      touch '"$SANDBOX_PORTS_DIR"'/SANDBOX_READY_$(hostname)
       echo "[INFO] Sandbox ready on $(hostname):'"$SANDBOX_PORT"'"
+      if [[ "${SCIPROBE_REQUIRE_SECCOMP_NETWORK_BLOCK:-}" == "1" ]]; then
+        seccomp_ready_file="${SANDBOX_PORTS_DIR:?}/sciprobe-seccomp-preflight.ready"
+        if [[ ! -r "$seccomp_ready_file" ]] \
+          || ! grep -Fqx "[SCIPROBE_SANDBOX_SECCOMP_PREFLIGHT_OK]" "$seccomp_ready_file"; then
+          echo "[ERROR] Sandbox service opened without a valid seccomp preflight attestation" >&2
+          exit 1
+        fi
+        echo "[SCIPROBE_SANDBOX_SECCOMP_PREFLIGHT_OK]"
+      fi
+      echo "[SCIPROBE_SANDBOX_READY]"
       wait $SANDBOX_PID
     ' &
   SRUN_PIDS["sandbox"]=$!
@@ -1046,9 +1416,30 @@ else
   echo "[INFO] SANDBOX_CONTAINER or SANDBOX_COMMAND not defined, skipping sandbox startup"
 fi
 
+# Ray and NeMo Gym are trusted processes and need job-scoped verifier/auth
+# credentials. Export names only so `set -x` never prints credential values.
+# The model sandbox above uses its own explicit allowlist and does not receive
+# any of these variables.
+TRUSTED_PROCESS_EXPORTS="ALL"
+for trusted_name in \
+  SCIPROBE_VERIFIER_TOKEN \
+  SCIPROBE_CAPABILITY_SIGNING_KEY \
+  SCIPROBE_TRUSTED_INGRESS_TOKEN \
+  SCIPROBE_POLICY_GENERATION_TOKEN \
+  SCIPROBE_CAPABILITY_STORE_PATH \
+  SCIPROBE_PRIVATE_PROBE_ROOT \
+  SCIPROBE_HOST_PRIVATE_PROBE_ROOT \
+  SCIPROBE_RUNTIME_DATASET_PATH \
+  RAY_AUTH_MODE \
+  RAY_AUTH_TOKEN_PATH; do
+  if [[ -n "${!trusted_name+x}" ]]; then
+    TRUSTED_PROCESS_EXPORTS+=",${trusted_name}"
+  fi
+done
+
 # Start the Ray head.
 log_phase "launching Ray head + worker sruns"
-srun $COMMON_SRUN_ARGS --container-name=ray-head --nodes=1 --ntasks=1 --cpus-per-task=$CPUS_PER_WORKER -w "$head_node" -o $LOG_DIR/ray-head.log bash -x -c "$head_cmd" &
+srun $COMMON_SRUN_ARGS --export="$TRUSTED_PROCESS_EXPORTS" --container-name=ray-head --nodes=1 --ntasks=1 --cpus-per-task=$CPUS_PER_WORKER -w "$head_node" -o $LOG_DIR/ray-head.log bash -x -c "$head_cmd" &
 SRUN_PIDS["ray-head"]=$!
 
 # Start the Ray workers (all nodes except the head) with a single batched srun, so
@@ -1061,6 +1452,7 @@ if [[ $_num_workers -gt 0 ]]; then
   # width so ray-worker-*.log filenames sort naturally (e.g. ray-worker-007.log).
   _task_digits=${#_num_workers}
   srun $COMMON_SRUN_ARGS --container-name=ray-worker --exact \
+    --export="$TRUSTED_PROCESS_EXPORTS" \
     --nodes=$_num_workers \
     --ntasks=$_num_workers \
     --ntasks-per-node=1 \

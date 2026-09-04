@@ -1,0 +1,28 @@
+ns_tools:
+  resources_servers:
+    sciprobe_ns_tools:
+      entrypoint: app.py
+      default_verifier: sciprobe_checks
+      verifiers:
+        sciprobe_checks:
+          type: resources_servers
+          name: sciprobe_checks
+      verifier_auth_token_env_var: SCIPROBE_VERIFIER_TOKEN
+      verifier_auth_header_name: X-SciProbe-Verifier-Token
+      capability_signing_key_env_var: SCIPROBE_CAPABILITY_SIGNING_KEY
+      capability_header_name: X-SciProbe-Rollout-Capability
+      capability_store_path_env_var: SCIPROBE_CAPABILITY_STORE_PATH
+      capability_wait_timeout_s: 30.0
+      capability_poll_interval_s: 0.05
+      num_workers: 1
+      nemo_skills_tools:
+        - nemo_skills.mcp.servers.python_tool::DirectPythonTool
+      nemo_skills_tool_overrides:
+        DirectPythonTool:
+          exec_timeout_s: 30
+      sandbox_host: ${oc.env:NEMO_SKILLS_SANDBOX_HOST,127.0.0.1}
+      sandbox_port: ${oc.env:NEMO_SKILLS_SANDBOX_PORT,6000}
+      disable_session_restore: true
+      domain: agent
+      verified: false
+      description: Stateful Python tools with authenticated SciProbe verification

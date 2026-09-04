@@ -37,6 +37,7 @@ from nemo_rl.algorithms.grpo import (
     refit_policy_generation,
     setup,
     shutdown_environments,
+    validate,
 )
 from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.data.utils import setup_response_data
@@ -49,6 +50,7 @@ from nemo_rl.environments.nemo_gym import (
 from nemo_rl.experience.rollouts import run_nemo_gym_rollout_sync
 from nemo_rl.models.generation import configure_generation_config
 from nemo_rl.models.generation.vllm.config import materialize_vllm_video_config
+from nemo_rl.utils.checkpoint import CheckpointManager
 from nemo_rl.utils.config import (
     load_config,
     parse_hydra_overrides,
@@ -119,6 +121,43 @@ def collect_trajectories(
         # And also leverage the TimeoutChecker functionality as well
 
     policy_generation.finish_generation()
+
+
+def _finish_validation_only(
+    policy_generation: GenerationInterface | None,
+    logger: Logger,
+    checkpointer: CheckpointManager,
+    primary_error: BaseException | None,
+) -> None:
+    """Run every validation-only teardown action without masking the body error."""
+    actions = [
+        ("logger.finish", logger.finish),
+        ("checkpointer.shutdown", checkpointer.shutdown),
+    ]
+    if policy_generation is not None:
+        actions.insert(
+            0,
+            (
+                "policy_generation.finish_generation",
+                policy_generation.finish_generation,
+            ),
+        )
+
+    teardown_errors: list[tuple[str, BaseException]] = []
+    for label, action in actions:
+        try:
+            action()
+        except BaseException as error:
+            teardown_errors.append((label, error))
+            print(
+                f"Validation-only teardown failed in {label}: "
+                f"{type(error).__name__}: {error}",
+                flush=True,
+            )
+
+    if primary_error is None and teardown_errors:
+        _, first_error = teardown_errors[0]
+        raise first_error
 
 
 def main() -> None:
@@ -229,12 +268,20 @@ The validation set you pass in will directly be used for validation with no addi
         maybe_configure_data_plane_env(config.data_plane)
         init_ray()
 
-    # `is_trajectory_collection` is a NeMo-RL-side control-flow knob; pop it
-    # before setup() so it is not forwarded into NeMo-Gym's global config (the
-    # gym actor is now created inside setup()).
+    # These are NeMo-RL-side control-flow knobs; pop them before setup() so
+    # they are not forwarded into NeMo-Gym's global config (the gym actor is
+    # now created inside setup()).
     is_trajectory_collection = (
         config.env["nemo_gym"].pop("is_trajectory_collection", False) or False
     )
+    is_validation_only = (
+        config.env["nemo_gym"].pop("is_validation_only", False) or False
+    )
+    if is_trajectory_collection and is_validation_only:
+        raise ValueError(
+            "env.nemo_gym.is_trajectory_collection and is_validation_only "
+            "are mutually exclusive"
+        )
 
     with rl_init_timer.time("setup"):
         (
@@ -285,6 +332,81 @@ The validation set you pass in will directly be used for validation with no addi
                 logger=logger,
                 master_config=master_config,
             )
+        elif is_validation_only:
+            validation_error: BaseException | None = None
+            try:
+                latest_checkpoint_path = checkpointer.get_latest_checkpoint_path()
+                if latest_checkpoint_path is None or grpo_state.total_steps <= 0:
+                    raise RuntimeError(
+                        "validation-only mode requires a completed checkpoint with "
+                        "positive total_steps"
+                    )
+                expected_checkpoint_name = f"step_{grpo_state.total_steps}"
+                if os.path.basename(latest_checkpoint_path) != expected_checkpoint_name:
+                    raise RuntimeError(
+                        "latest checkpoint does not match restored training state: "
+                        f"{latest_checkpoint_path!r} versus {expected_checkpoint_name!r}"
+                    )
+                if val_dataloader is None:
+                    raise RuntimeError(
+                        "validation-only mode requires a validation dataset"
+                    )
+                if policy_generation is None:
+                    raise RuntimeError(
+                        "validation-only mode requires a generation policy"
+                    )
+
+                print(
+                    "🔍 Running checkpoint-reload validation from "
+                    f"{latest_checkpoint_path}...",
+                    flush=True,
+                )
+                colocated_inference = master_config.policy["generation"]["colocated"][
+                    "enabled"
+                ]
+                refit_policy_generation(
+                    policy,
+                    policy_generation,
+                    colocated_inference,
+                    _refit_buffer_size_gb=master_config.policy.get(
+                        "refit_buffer_size_gb"
+                    ),
+                )
+                val_metrics, validation_timings = validate(
+                    policy_generation,
+                    val_dataloader,
+                    tokenizer,
+                    val_task_to_env,
+                    step=grpo_state.total_steps,
+                    master_config=master_config,
+                    logger=logger,
+                    processor=processor,
+                )
+                logger.log_metrics(
+                    val_metrics,
+                    grpo_state.total_steps,
+                    prefix="validation",
+                )
+                logger.log_metrics(
+                    validation_timings,
+                    grpo_state.total_steps,
+                    prefix="timing/validation",
+                )
+                print(
+                    "Validation-only mode completed without invoking grpo_train "
+                    "or consuming the training dataloader.",
+                    flush=True,
+                )
+            except BaseException as error:
+                validation_error = error
+                raise
+            finally:
+                _finish_validation_only(
+                    policy_generation,
+                    logger,
+                    checkpointer,
+                    validation_error,
+                )
         # Check if async mode is enabled
         elif config.grpo.async_grpo.enabled:
             # Async GRPO does not support dynamic sampling, reward scaling, or reward shaping (DAPO features)

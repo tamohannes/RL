@@ -162,6 +162,9 @@ class AutomodelKwargs(TypedDict):
     # auto-detected and set at runtime if not explicitly configured.
     # See: https://github.com/NVIDIA-NeMo/RL/issues/2072
     force_hf: NotRequired[bool]
+    # Model-family override used to disable trainer-only MTP where generation
+    # does not use speculative decoding.
+    num_nextn_predict_layers: NotRequired[int]
 
 
 class DTensorConfigDisabled(TypedDict):

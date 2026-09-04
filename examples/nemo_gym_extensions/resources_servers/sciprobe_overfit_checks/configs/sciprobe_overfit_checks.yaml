@@ -1,0 +1,20 @@
+sciprobe_overfit_checks:
+  resources_servers:
+    sciprobe_overfit_checks:
+      entrypoint: app.py
+      auth_token_env_var: SCIPROBE_VERIFIER_TOKEN
+      auth_header_name: X-SciProbe-Verifier-Token
+      probes:
+        stateful-choice-overfit-v1:
+          tool_name: stateful_python_code_exec
+          state_name: carry
+          state_value: 17
+          expected_second_output: "55"
+          choices:
+            - A
+            - B
+          rewarded_choice: B
+      domain: agent
+      verified: false
+      description: Deterministic reward for the isolated GRPO overfit canary
+      value: Reward choice B after a fixed two-call stateful Python trace

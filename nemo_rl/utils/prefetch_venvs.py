@@ -38,6 +38,8 @@ def prefetch_venvs(filters=None, negative_filters=None):
     if negative_filters:
         print(f"Excluding: {negative_filters}")
 
+    force_rebuild = os.environ.get("NRL_FORCE_REBUILD_VENVS", "false").lower() == "true"
+
     # Track statistics for summary
     skipped_by_filter = []
     skipped_by_negative_filter = []
@@ -74,7 +76,9 @@ def prefetch_venvs(filters=None, negative_filters=None):
         for actor_fqn in actor_fqns:
             print(f"  Creating venv for: {actor_fqn}")
             try:
-                python_path = create_local_venv(py_executable, actor_fqn)
+                python_path = create_local_venv(
+                    py_executable, actor_fqn, force_rebuild=force_rebuild
+                )
                 print(f"    Success: {python_path}")
                 prefetched.append(actor_fqn)
             except Exception as e:

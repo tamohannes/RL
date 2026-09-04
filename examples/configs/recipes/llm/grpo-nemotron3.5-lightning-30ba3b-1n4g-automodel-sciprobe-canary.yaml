@@ -1,0 +1,81 @@
+defaults: dapo-nanov3.5-30BA3B-4n8g-automodel.yaml
+grpo:
+  num_prompts_per_step: 1
+  num_generations_per_prompt: 4
+  max_num_epochs: 1
+  max_num_steps: 1
+  val_at_start: false
+  val_period: 0
+  use_dynamic_sampling: false
+  batch_multiplier: 1
+  overlong_filtering: false
+  use_leave_one_out_baseline: true
+  reward_scaling:
+    enabled: false
+  reward_shaping:
+    enabled: false
+  seq_logprob_error_threshold: 2
+loss_fn:
+  use_importance_sampling_correction: false
+  truncated_importance_sampling_type: null
+  truncated_importance_sampling_ratio: null
+  ratio_clip_c: null
+  force_on_policy_ratio: true
+checkpointing:
+  checkpoint_dir: results/sciprobe-lightning-probe-canary-r1
+  metric_name: null
+  keep_top_k: 1
+  save_period: 1
+  checkpoint_must_save_by: 00:03:30:00
+  save_optimizer: false
+policy:
+  train_global_batch_size: 4
+  make_sequence_length_divisible_by: 64
+  max_total_sequence_length: 2048
+  scheduler:
+  - name: torch.optim.lr_scheduler.ConstantLR
+    kwargs:
+      factor: 1.0
+      total_iters: 1
+  - milestones: []
+  dtensor_cfg:
+    expert_parallel_size: 4
+    env_vars:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:False
+    automodel_kwargs:
+      num_nextn_predict_layers: 0
+      backend:
+        dispatcher: hybridep
+  dynamic_batching:
+    enabled: false
+  generation:
+    max_new_tokens: 1024
+    vllm_kwargs:
+      mamba_ssm_cache_dtype: float32
+data:
+  max_input_seq_length: 1024
+  shuffle: false
+  train:
+    dataset_name: ResponseDataset
+    data_path: examples/data/sciprobe/total-low-vaf-control-parents-canary.jsonl
+    input_key: input
+    output_key: output
+    split_validation_size: 0.0
+  validation: null
+  default:
+    dataset_name: ResponseDataset
+    input_key: input
+    output_key: output
+env:
+  math:
+    num_workers: 1
+    math_verify_impl: hf_math_verify
+logger:
+  wandb_enabled: false
+  log_dir: results/sciprobe-lightning-probe-canary-r1/logs
+  wandb:
+    project: sciprobe
+    name: lightning-probe-canary-r1
+cluster:
+  gpus_per_node: 4
+  num_nodes: 1
