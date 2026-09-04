@@ -105,7 +105,15 @@ enroot start \
     cd /workspace/RL
     uv lock --check
 
-    wheel_arch=aarch64
+    # The vLLM release wheel is per-architecture. Derive it from the build host so the
+    # same script produces an aarch64 image on a Grace cluster and an x86_64 one on an
+    # Intel cluster, instead of silently building the wrong wheel into the image.
+    wheel_arch="$(uname -m)"
+    case "${wheel_arch}" in
+      aarch64|x86_64) ;;
+      *) echo "unsupported build architecture: ${wheel_arch}" >&2; exit 1 ;;
+    esac
+    echo "wheel_arch=${wheel_arch}"
     gym_override=/tmp/sciprobe-gym-vllm-override.txt
     printf "%s\n" \
       "vllm @ https://github.com/vllm-project/vllm/releases/download/v0.24.0/vllm-0.24.0-cp38-abi3-manylinux_2_28_${wheel_arch}.whl" \

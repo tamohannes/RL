@@ -23,7 +23,7 @@ set -euo pipefail
 
 # Rebase the public NeMo-RL release image onto the dependencies locked by the
 # mounted source checkout. This is a CPU-only, registry-free substitute for the
-# arm64 Docker build described in the Lightning guide.
+# Docker build described in the Lightning guide. Architecture follows the build host.
 : "${BASE_SQSH:?BASE_SQSH is required}"
 : "${OUTPUT_SQSH:?OUTPUT_SQSH is required}"
 : "${CODE_DIR:?CODE_DIR is required}"
