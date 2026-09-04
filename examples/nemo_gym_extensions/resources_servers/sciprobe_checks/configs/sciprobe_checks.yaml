@@ -4,7 +4,7 @@ sciprobe_checks:
       entrypoint: app.py
       checker_timeout_s: 150.0
       checker_process_timeout_s: 120.0
-      checker_python: ${oc.env:SCIPROBE_CHECKER_PYTHON,}
+      checker_python: ${oc.env:SCIPROBE_CHECKER_PYTHON,''}
       auth_token_env_var: SCIPROBE_VERIFIER_TOKEN
       auth_header_name: X-SciProbe-Verifier-Token
       probes:
