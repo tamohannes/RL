@@ -1,0 +1,53 @@
+# Signal canary on 2 nodes of 8x A100 80GB.
+#
+# The canary chain was tuned for one node of 4x GB300, where 288 GB per GPU made
+# 1152 GB available and let activation checkpointing stay off. An 80 GB card is a
+# different machine: upstream's own reference for this model
+# (dapo-nanov3.5-30BA3B-4n8g-automodel.yaml) runs it on 4 nodes of 8x H100 80GB.
+# Two nodes give 1280 GB, slightly more than the GB300 configuration it is
+# reproducing, and schedule as fast as one.
+#
+# Everything about the experiment is inherited unchanged: one real probe, eight
+# generations, an 8192 token budget and a 12288 token context. Only placement and
+# the accelerator-specific knobs move, so a difference in outcome is attributable
+# to the hardware and not to the task.
+defaults: grpo-nemotron3.5-lightning-30ba3b-1n4g-automodel-sciprobe-signal-canary.yaml
+
+policy:
+  dtensor_cfg:
+    # One expert-parallel rank per GPU on a node.
+    expert_parallel_size: 8
+
+    # Back on. The canary could afford to keep activations resident on a 288 GB
+    # card; at 80 GB the memory matters more than the recompute.
+    activation_checkpointing: true
+    moe_parallelizer:
+      ignore_router_for_ac: true
+
+    env_vars:
+      # The canary pinned this to False for exact single-step reproducibility on
+      # GB300. Fragmentation is the binding constraint at 80 GB, so follow the
+      # upstream reference instead.
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+
+    automodel_kwargs:
+      # Keep MTP off: the checkpoint's mtp.* tensors are not trained here.
+      num_nextn_predict_layers: 0
+      backend:
+        _target_: nemo_automodel.components.models.common.utils.BackendConfig
+        attn: te
+        linear: te
+        rms_norm: torch_fp32
+        experts: gmm
+        # Neither of the two dispatchers the other recipes use is a safe default
+        # here. `hybridep` was chosen for GB300 and `deepep` is what the H100
+        # reference uses; both are accelerator-specific. `torch` is the generic
+        # DTensor all-gather/reduce-scatter path, so it is the honest starting
+        # point on Ampere. Try `deepep` only after this run works.
+        dispatcher: torch
+        rope_fusion: false
+        enable_hf_state_dict_adapter: true
+
+cluster:
+  gpus_per_node: 8
+  num_nodes: 2
