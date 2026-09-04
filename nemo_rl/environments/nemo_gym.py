@@ -72,6 +72,11 @@ DEFAULT_INVALID_TOOL_CALL_PATTERNS = [
 ]
 DEFAULT_THINKING_TAGS = ["<think>", "</think>"]
 
+# Gym agents use this top-level result key to mark a failed rollout attempt. Keep
+# the string local so importing this module does not make NeMo Gym a mandatory
+# NeMo-RL import-time dependency.
+_NEMO_GYM_FAILURE_CLASS_KEY = "_ng_failure_class"
+
 
 class NemoGymCompatibleConfig(Protocol):
     """Configuration fields required to select the NeMo Gym rollout path."""
@@ -534,6 +539,16 @@ Depending on your data shape, you may want to change these values."""
                         # the whole point. The status and message are already in `detail`.
                         raise typed from None
                     raise
+
+            if (
+                isinstance(nemo_gym_result, dict)
+                and nemo_gym_result.get(_NEMO_GYM_FAILURE_CLASS_KEY) is not None
+            ):
+                failure_class = nemo_gym_result[_NEMO_GYM_FAILURE_CLASS_KEY]
+                detail = f"NeMo-Gym returned failed rollout class {failure_class!r}"
+                if nemo_gym_result.get("error"):
+                    detail += f": {nemo_gym_result['error']}"
+                raise GymTransportError(detail)
 
             with timer.time(label=f"{timer_prefix}/postprocess_results"):
                 nemo_rl_result = self._postprocess_nemo_gym_to_nemo_rl_result(

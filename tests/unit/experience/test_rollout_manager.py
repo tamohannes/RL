@@ -86,6 +86,46 @@ def _with_cut(buffer, callback):
     return _run(apply())
 
 
+def test_sciprobe_harbor_row_loads_and_expands_to_eight_rollouts(tmp_path):
+    source_row = {
+        "instance_id": "sciprobe::task",
+        "responses_create_params": {"input": []},
+        "agent_ref": {"name": "harbor_agent"},
+    }
+    data_path = tmp_path / "sciprobe.jsonl"
+    data_path.write_text(json.dumps(source_row) + "\n")
+
+    dataset = NemoGymDataset(str(data_path))
+    prompt = nemo_gym_data_processor(dataset.dataset[0], None, None, None, 0)
+    assert prompt["extra_env_info"] == source_row
+
+    impl = object.__new__(AsyncNemoGymRolloutImpl)
+    impl._num_generations_per_prompt = 8
+    impl._generation_config = {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "max_new_tokens": 256,
+    }
+    rollout_rows = impl._build_inputs(prompt)
+
+    assert len(rollout_rows) == 8
+    assert [row["_rowidx"] for row in rollout_rows] == list(range(8))
+    for rowidx, row in enumerate(rollout_rows):
+        assert row == {
+            "instance_id": "sciprobe::task",
+            "responses_create_params": {
+                "input": [],
+                "temperature": 1.0,
+                "top_p": 1.0,
+                "max_output_tokens": 256,
+            },
+            "agent_ref": {"name": "harbor_agent"},
+            "_rowidx": rowidx,
+        }
+    # Building attempts must not mutate the exporter-owned source row.
+    assert prompt["extra_env_info"] == source_row
+
+
 class _FakeBuffer:
     """Minimal TQReplayBuffer stand-in that records reserve/commit calls."""
 

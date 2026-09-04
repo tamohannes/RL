@@ -61,6 +61,7 @@ from nemo_rl.environments.nemotron_utils import (
     _expand_nemotron_video_placeholders,
     _flatten_nemotron_video_frame_messages,
 )
+from nemo_rl.experience.failures import GymTransportError
 from nemo_rl.experience.rollouts import (
     _reattach_original_multimodal_payloads,
     attach_static_multimodal_payload,
@@ -1600,6 +1601,126 @@ def test_nemo_gym_run_rollouts_normalizes_mixed_media_before_dispatch(tmp_path):
         assert postprocess_calls == [(nemo_gym_row, nemo_gym_result, tokenizer, True)]
         assert streamed_results[0][0] == 7
         assert streamed_results[0][1] == {"message_log": []}
+
+    asyncio.run(_run())
+
+
+def test_nemo_gym_run_rollouts_routes_failure_sentinel_before_postprocess():
+    async def _run():
+        nemo_gym_row = {
+            "_rowidx": 0,
+            "agent_ref": {"name": "harbor_agent"},
+            "responses_create_params": {"input": []},
+        }
+        nemo_gym_result = {
+            "_ng_failure_class": "harbor_agent_error",
+            "error": "Harbor verifier produced no finite numeric reward",
+            "reward": 0.0,
+            # Harbor preserves partial trajectories on verifier failure. Even an
+            # otherwise trainable-looking trace must obey the top-level sentinel.
+            "response": {
+                "output": [
+                    {
+                        "prompt_token_ids": [10],
+                        "generation_token_ids": [20],
+                        "generation_log_probs": [-0.1],
+                    }
+                ]
+            },
+        }
+
+        class _RolloutCollectionHelper:
+            def run_examples(self, examples, head_server_config):
+                del examples, head_server_config
+
+                async def _completed_result():
+                    return nemo_gym_row, nemo_gym_result
+
+                return [_completed_result()]
+
+        class _MockSelf:
+            cfg = {}
+            rch = _RolloutCollectionHelper()
+            head_server_config = object()
+            _tokenizer = object()
+
+            def _require_spinup(self):
+                pass
+
+            def _postprocess_nemo_gym_to_nemo_rl_result(self, *args, **kwargs):
+                raise AssertionError("failure result must not be postprocessed")
+
+        with pytest.raises(
+            GymTransportError,
+            match="harbor_agent_error.*no finite numeric reward",
+        ):
+            async for _ in NemoGym.__ray_metadata__.modified_class.run_rollouts(
+                _MockSelf(), [nemo_gym_row], "test"
+            ):
+                pass
+
+    asyncio.run(_run())
+
+
+def test_nemo_gym_run_rollouts_keeps_genuine_zero_reward_trainable():
+    async def _run():
+        nemo_gym_row = {
+            "_rowidx": 0,
+            "agent_ref": {"name": "harbor_agent"},
+            "responses_create_params": {"input": []},
+        }
+        nemo_gym_result = {
+            "reward": 0.0,
+            "responses_create_params": {"input": []},
+            "response": {
+                "output": [
+                    {
+                        "role": "assistant",
+                        "prompt_token_ids": [10],
+                        "generation_token_ids": [20],
+                        "generation_log_probs": [-0.1],
+                    }
+                ]
+            },
+        }
+
+        class _Tokenizer:
+            def batch_decode(self, batch):
+                return ["decoded"] * len(batch)
+
+        class _RolloutCollectionHelper:
+            def run_examples(self, examples, head_server_config):
+                del examples, head_server_config
+
+                async def _completed_result():
+                    return nemo_gym_row, nemo_gym_result
+
+                return [_completed_result()]
+
+        class _MockSelf:
+            cfg = {}
+            rch = _RolloutCollectionHelper()
+            head_server_config = object()
+            _tokenizer = _Tokenizer()
+            _processor = None
+
+            def _require_spinup(self):
+                pass
+
+            _postprocess_nemo_gym_to_nemo_rl_result = NemoGym.__ray_metadata__.modified_class._postprocess_nemo_gym_to_nemo_rl_result
+
+        streamed = []
+        async for item in NemoGym.__ray_metadata__.modified_class.run_rollouts(
+            _MockSelf(), [nemo_gym_row], "test"
+        ):
+            streamed.append(item)
+
+        assert len(streamed) == 1
+        assert streamed[0][1]["full_result"]["reward"] == 0.0
+        assert streamed[0][1]["message_log"][1]["token_ids"].tolist() == [20]
+        assert streamed[0][1]["message_log"][1][
+            "generation_logprobs"
+        ].tolist() == pytest.approx([-0.1])
 
     asyncio.run(_run())
 
