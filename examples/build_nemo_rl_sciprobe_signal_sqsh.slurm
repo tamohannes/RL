@@ -122,11 +122,13 @@ enroot start \
     # the repair was skipped while the interpreters that actually matter, the ray
     # venvs, stayed dangling. The gym CLI then died on a missing bin/python3.
     #
-    # Being idempotent is what lets this stage build directly on the base image.
-    # The intermediate ns-tools stage bakes servers this run does not use, since
-    # the config_paths of the recipe name only vllm_model, sciprobe_simple_agent,
-    # sciprobe_checks and sciprobe_ns_tools, and the chain deletes ns_tools
-    # outright. Skipping it saves an image and a build.
+    # Idempotent so this runs safely whatever the base image has already had
+    # done to it. It does not make the stage self-sufficient: the ns-tools stage
+    # is still required first. Its gym server venvs are indeed unused here, but
+    # it also rebuilds the NemoGym actor venv, whose package symlinks in the
+    # release image point into a uv cache archive that was never shipped.
+    # Building straight off the base image gets past this repair and then dies
+    # on ModuleNotFoundError: No module named nemo_gym.
     export UV_INSTALL_DIR=/opt/uv/bin
     mkdir -p "${UV_INSTALL_DIR}" "${UV_PYTHON_INSTALL_DIR}"
     if ! command -v uv >/dev/null 2>&1; then
