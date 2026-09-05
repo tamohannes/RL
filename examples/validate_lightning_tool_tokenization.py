@@ -106,6 +106,16 @@ def main() -> None:
             "sciprobe-tool-canary.yaml"
         ),
     )
+    parser.add_argument(
+        "--train-path",
+        default=None,
+        help=(
+            "Rows this run will actually train on. The config alone is not "
+            "enough: the launcher overrides data.train.data_path on the command "
+            "line, so the config still names the inherited canary file and "
+            "validating that would check rows the run never sees."
+        ),
+    )
     args = parser.parse_args()
 
     resolved_config = OmegaConf.to_container(load_config(args.config), resolve=True)
@@ -113,21 +123,33 @@ def main() -> None:
     assert master_config.logger["wandb_enabled"] is True
     assert master_config.logger["wandb"]["mode"] == "offline"
     assert master_config.logger["wandb"]["log_nemo_gym_full_result_tables"] is True
-    data_path = Path(master_config.data["train"]["data_path"])
+    data_path = Path(
+        args.train_path
+        if args.train_path
+        else master_config.data["train"]["data_path"]
+    )
     rows = [
         json.loads(line)
         for line in data_path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    assert len(rows) == 1, f"expected one canary row in {data_path}"
+    assert rows, f"no rows in {data_path}"
+    # Every row, not just the first. A bank run trains on many, and a single
+    # row with a generation budget the policy cannot honour is exactly the kind
+    # of mismatch this check exists to catch.
+    max_new_tokens = master_config.policy["generation"]["max_new_tokens"]
+    for row in rows:
+        params = row["responses_create_params"]
+        assert params["tools"] == [PYTHON_TOOL_FLAT], (
+            f"{row.get('id', '?')} must use the native flat tool schema"
+        )
+        assert params["max_output_tokens"] <= max_new_tokens, (
+            f"{row.get('id', '?')} asks for {params['max_output_tokens']} output "
+            f"tokens but the policy generates at most {max_new_tokens}"
+        )
     responses_create_params = rows[0]["responses_create_params"]
     initial_messages = responses_create_params["input"]
     tools = responses_create_params["tools"]
-    assert tools == [PYTHON_TOOL_FLAT], "canary must use the native flat tool schema"
-    assert (
-        responses_create_params["max_output_tokens"]
-        <= (master_config.policy["generation"]["max_new_tokens"])
-    )
 
     model_path = Path(args.model).resolve()
     template_path = model_path / "chat_template.jinja"

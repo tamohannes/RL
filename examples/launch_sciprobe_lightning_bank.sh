@@ -194,7 +194,7 @@ export COMMAND="export PATH=/opt/uv/bin:/opt/nemo_rl_venv/bin:\${PATH} && \
   /opt/ray_venvs/nemo_rl.models.policy.workers.dtensor_policy_worker_v2.DTensorPolicyWorkerV2/bin/python \
     examples/validate_lightning_mtp_disabled.py --model ${MODEL_PATH} && \
   uv run --locked --no-sync python examples/validate_lightning_tool_tokenization.py \
-    --model ${MODEL_PATH} --config ${CONFIG_PATH} && \
+    --model ${MODEL_PATH} --config ${CONFIG_PATH} --train-path ${TRAIN_PATH} && \
   NRL_VLLM_USE_V1=1 \
   NRL_WG_USE_RAY_REF=1 \
   UV_HTTP_TIMEOUT=300 \
