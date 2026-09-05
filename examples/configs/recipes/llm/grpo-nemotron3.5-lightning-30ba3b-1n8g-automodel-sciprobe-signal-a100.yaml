@@ -22,8 +22,26 @@ defaults: grpo-nemotron3.5-lightning-30ba3b-1n4g-automodel-sciprobe-signal-canar
 
 policy:
   dtensor_cfg:
-    # One expert-parallel rank per GPU on a node.
-    expert_parallel_size: 8
+    # Expert parallelism has to leave room for a data-parallel axis.
+    #
+    # data_parallel_size is derived as world_size / (tp * cp * ep). One rank per
+    # GPU meant 8 / (1 * 1 * 8) = 1, and with no DP axis FSDP has nothing to
+    # shard along: experts were split 8 ways by EP while every non-expert
+    # parameter, gradient and optimizer state sat in full on every GPU. The run
+    # log confirms it, data_parallel_size=1, and so does the arithmetic, roughly
+    # 27GB of sharded experts plus roughly 24GB of unsharded remainder plus
+    # activations, against the 67.98 GiB PyTorch actually reported holding.
+    #
+    # That figure barely moved when generation's share of the card was cut from
+    # 0.5 to 0.3, which is what showed the resident state and not the KV cache
+    # was the problem all along.
+    #
+    # ep=2 gives 8 / (1 * 1 * 2) = 4. Experts stay split 8 ways in total, ep
+    # times dp, and the remainder is finally divided by 4 instead of held whole.
+    # The four-node reference this recipe descends from runs ep=8 because 32
+    # GPUs still leave dp=4; copying the number onto one node did not copy that
+    # property.
+    expert_parallel_size: 2
 
     # Back on. The canary could afford to keep activations resident on a 288 GB
     # card; at 80 GB the memory matters more than the recompute.
