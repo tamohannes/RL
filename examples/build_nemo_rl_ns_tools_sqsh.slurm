@@ -35,7 +35,33 @@ fi
 
 CONTAINER_NAME="sciprobe-nemo-rl-ns-tools-${SLURM_JOB_ID}"
 OUTPUT_TMP="${OUTPUT_SQSH}.tmp-${SLURM_JOB_ID}"
-ENROOT_ROOT="/tmp/sciprobe-enroot-ns-tools-${SLURM_JOB_ID}"
+# The node root disk is about 98GB, and an unpacked image plus the venvs built on
+# top of it does not fit there. Sites commonly provide a much larger node-local
+# scratch, so pick the roomiest writable one instead of assuming /tmp, and refuse
+# up front rather than failing forty minutes in with ENOSPC.
+ENROOT_SCRATCH_MIN_GB="${ENROOT_SCRATCH_MIN_GB:-110}"
+scratch_base=""
+scratch_avail=0
+for candidate in "${ENROOT_SCRATCH_DIR:-}" /raid/scratch /scratch /tmp; do
+  [[ -n "${candidate}" && -d "${candidate}" && -w "${candidate}" ]] || continue
+  candidate_avail="$(df -PBG "${candidate}" 2>/dev/null | awk 'NR==2 {gsub(/G/, "", $4); print $4}')"
+  [[ -n "${candidate_avail}" ]] || continue
+  if (( candidate_avail > scratch_avail )); then
+    scratch_base="${candidate}"
+    scratch_avail="${candidate_avail}"
+  fi
+done
+if [[ -z "${scratch_base}" ]]; then
+  echo "no writable scratch directory found" >&2
+  exit 1
+fi
+if (( scratch_avail < ENROOT_SCRATCH_MIN_GB )); then
+  echo "scratch ${scratch_base} has ${scratch_avail}GB free, need ${ENROOT_SCRATCH_MIN_GB}GB" >&2
+  exit 1
+fi
+echo "scratch_base=${scratch_base} (${scratch_avail}GB free)"
+
+ENROOT_ROOT="${scratch_base}/sciprobe-enroot-ns-tools-${SLURM_JOB_ID}"
 
 export ENROOT_CACHE_PATH="${ENROOT_ROOT}/cache"
 export ENROOT_DATA_PATH="${ENROOT_ROOT}/data"
@@ -59,7 +85,7 @@ echo "output_sqsh=${OUTPUT_SQSH}"
 echo "code_dir=${CODE_DIR}"
 uname -m
 enroot version
-df -h /tmp
+df -h "${scratch_base}"
 
 enroot create --name "${CONTAINER_NAME}" "${BASE_SQSH}"
 
