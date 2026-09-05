@@ -62,6 +62,21 @@ policy:
   # activation checkpointing on.
   max_total_sequence_length: 32768
 
+  # Chunk the logprob computation along the sequence.
+  #
+  # Both OOMs were the logits tensor, not activations in general. The failed
+  # allocation was 16.00 GiB, which is about vocab x 32768 x 4 bytes: the whole
+  # sequence's logits cast to float32 at once. Step 1 of a run would fit and
+  # step 2 would not, because the size tracks each probe's episode length, which
+  # is why moving the step cap only changed which step died.
+  #
+  # Chunking casts and gathers per slice instead, so peak logits memory becomes
+  # 2048 rather than 32768 wide, roughly a gigabyte in place of sixteen. This is
+  # what the field is for: "chunked along the sequence dimension to avoid GPU
+  # OOM (especially during backward pass)". It is honoured on this path by
+  # nemo_rl/models/automodel/train.py.
+  logprob_chunk_size: 2048
+
   tokenizer:
     chat_template_kwargs:
       # Drop earlier turns' reasoning from the prompt.
