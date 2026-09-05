@@ -27,6 +27,7 @@ set -euo pipefail
 : "${BASE_SQSH:?BASE_SQSH is required}"
 : "${OUTPUT_SQSH:?OUTPUT_SQSH is required}"
 : "${CODE_DIR:?CODE_DIR is required}"
+: "${UV_CACHE_DIR_OVERRIDE:?UV_CACHE_DIR_OVERRIDE is required}"
 
 if [[ -e "${OUTPUT_SQSH}" ]]; then
   echo "Refusing to overwrite existing image: ${OUTPUT_SQSH}" >&2
@@ -43,6 +44,7 @@ export ENROOT_RUNTIME_PATH="${ENROOT_ROOT}/runtime"
 export ENROOT_TEMP_PATH="${ENROOT_ROOT}/tmp"
 mkdir -p \
   "$(dirname "${OUTPUT_SQSH}")" \
+  "${UV_CACHE_DIR_OVERRIDE}" \
   "${ENROOT_CACHE_PATH}" \
   "${ENROOT_DATA_PATH}" \
   "${ENROOT_RUNTIME_PATH}" \
@@ -65,6 +67,7 @@ enroot start \
   --root \
   --rw \
   --mount "${CODE_DIR}:/workspace/RL" \
+  --mount "${UV_CACHE_DIR_OVERRIDE}:/opt/uv-cache" \
   "${CONTAINER_NAME}" \
   bash -lc '
     set -euo pipefail
@@ -73,7 +76,9 @@ enroot start \
     export UV_PROJECT_ENVIRONMENT=/opt/nemo_rl_venv
     export UV_PYTHON_INSTALL_DIR=/opt/uv-python
     export UV_CACHE_DIR=/opt/uv-cache
-    export UV_LINK_MODE=hardlink
+    # The cache is bind-mounted from a different filesystem, so hardlinking
+    # into /opt/gym_venvs cannot work and uv would fall back with a warning.
+    export UV_LINK_MODE=copy
     export NEMO_GYM_VENV_DIR=/opt/gym_venvs
     export NEMO_GYM_EXTRA_ROOTS=/workspace/RL/examples/nemo_gym_extensions
     export NRL_FORCE_REBUILD_VENVS=false
