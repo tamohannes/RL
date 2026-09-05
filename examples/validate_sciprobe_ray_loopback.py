@@ -654,10 +654,19 @@ def main(
         explicit_ray_pids = {os.getpid()}
         if probe_actor_pid is not None:
             explicit_ray_pids.add(probe_actor_pid)
-        ray_process_count, ray_listeners = _ray_owned_tcp_listeners(
-            extra_pids=explicit_ray_pids,
-            exclude_inodes=inherited_listener_inodes,
-        )
+        if loopback_expected:
+            ray_process_count, ray_listeners = _ray_owned_tcp_listeners(
+                extra_pids=explicit_ray_pids,
+                exclude_inodes=inherited_listener_inodes,
+            )
+        else:
+            # This enumeration exists only to prove the bind is loopback, and it
+            # fails closed when a Ray PID cannot be inspected. On a multi-node
+            # cluster Ray owns processes this driver has no /proc visibility
+            # into, so it raises "explicit Ray PIDs were not inspected" for a
+            # reason that is not a finding. Skip it with the other bind checks;
+            # the authentication assertions above and below are unaffected.
+            ray_process_count, ray_listeners = 0, []
         for listener in ray_listeners:
             for owner in listener["owners"]:
                 if owner["pid"] == os.getpid():
