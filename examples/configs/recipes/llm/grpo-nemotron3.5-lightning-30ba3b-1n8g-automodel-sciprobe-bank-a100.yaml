@@ -115,7 +115,7 @@ policy:
     #
     # 1536 is still a substantial turn: the traces show a few paragraphs of
     # reasoning and a short code block, nothing near even the old 8192.
-    max_new_tokens: 3072
+    max_new_tokens: 1536
 
     vllm_cfg:
       # Give generation less of the card so training can have more.
@@ -198,7 +198,20 @@ env:
           # max_total_sequence_length 9216 across four nodes; this one asks for
           # 32768 on one, so the sequence budget is the binding constraint here
           # and the step cap is how it is spent.
-          max_steps: 20
+          # 14, chosen so the worst case fits the window with margin.
+          #
+          # Memory is no longer the constraint; the window is. With no cap
+          # available on tool output (DirectPythonTool exposes only code,
+          # session_id and timeout) the episode cannot be bounded exactly, so it
+          # is bounded by arithmetic: 14 x 1536 is 21504 of generation, leaving
+          # roughly 11k for the task and fourteen tool results inside 32768.
+          #
+          # 14 clears what the work actually needs. The rollouts that reached an
+          # answer used 12 and 13 calls, and their whole tool execution took 4 to
+          # 18 seconds, so outputs are small. What 14 cuts off is the spiral, and
+          # a spiral that is cut off scores zero, which is honest, whereas one
+          # that runs to the window ends the entire run.
+          max_steps: 14
     ns_tools:
       resources_servers:
         sciprobe_ns_tools:
