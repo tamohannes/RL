@@ -70,6 +70,23 @@ checkpointing:
 
 env:
   nemo_gym:
+    ns_tools_simple_agent:
+      responses_api_agents:
+        sciprobe_simple_agent:
+          # Bound the episode. The agent shipped with max_steps 50, and nothing
+          # else stops it, so an episode that never converges keeps calling tools
+          # until the prompt fills the window. That is what produced the
+          # overflow: at 12288, at 32768, and again at 32768 with history
+          # reasoning dropped, always by exactly 25 tokens, because a generation
+          # is clamped to end exactly at the limit and the next turn's template
+          # then does not fit. The window was never the variable.
+          #
+          # Sixteen is well above what these probes need, which is read the data,
+          # compute, check, answer. It is far below the point where the prompt
+          # can reach 32768, and it matches what we already measured elsewhere:
+          # tool-call spirals set in around six or seven calls, after which the
+          # model is losing track rather than making progress.
+          max_steps: 16
     ns_tools:
       resources_servers:
         sciprobe_ns_tools:
