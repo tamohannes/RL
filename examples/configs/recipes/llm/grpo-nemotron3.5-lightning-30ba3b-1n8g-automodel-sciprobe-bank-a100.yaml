@@ -78,7 +78,7 @@ policy:
   # use_fused_linear_logprobs avoids materialising the tensor at all and is
   # documented as reaching past 100K. It is not available on the DTensor
   # automodel path this recipe uses.
-  max_total_sequence_length: 32768
+  max_total_sequence_length: 40960
 
   # Chunk the logprob computation along the sequence.
   #
@@ -204,23 +204,22 @@ env:
           # max_total_sequence_length 9216 across four nodes; this one asks for
           # 32768 on one, so the sequence budget is the binding constraint here
           # and the step cap is how it is spent.
-          # 14, chosen so the worst case fits the window with margin.
+          # 20, which is what SciProbe evaluation uses.
           #
-          # Memory is no longer the constraint; the window is. With no cap
-          # available on tool output (DirectPythonTool exposes only code,
-          # session_id and timeout) the episode cannot be bounded exactly, so it
-          # is bounded by arithmetic: 14 x 1536 is 21504 of generation, leaving
-          # roughly 11k for the task and fourteen tool results inside 32768.
-          #
-          # 14 clears what the work actually needs. The rollouts that reached an
-          # answer used 12 and 13 calls, and their whole tool execution took 4 to
-          # 18 seconds, so outputs are small. What 14 cuts off is the spiral, and
-          # a spiral that is cut off scores zero, which is honest, whereas one
-          # that runs to the window ends the entire run.
-          max_steps: 14
+          # sciprobe/probe_eval.py runs the same probes with max_turns=20, so
+          # training and evaluation now give the agent the same number of
+          # attempts at the task. Anything else measures a different agent than
+          # the one we report on, and the earlier caps of 14 and 16 were the
+          # single largest source of zero reward: across 128 rollouts, 79%
+          # emitted no answer at all because they ran out of steps.
+          max_steps: 20
     ns_tools:
       resources_servers:
         sciprobe_ns_tools:
           nemo_skills_tool_overrides:
             DirectPythonTool:
-              exec_timeout_s: 120
+              # 90s, matching cell_timeout in sciprobe/probe_eval.py. The
+              # inherited 30 was a toy-task value and cut real computation off
+              # mid-run; matching evaluation is better than inventing a third
+              # number.
+              exec_timeout_s: 90
