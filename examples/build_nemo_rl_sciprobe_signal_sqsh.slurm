@@ -97,7 +97,7 @@ enroot start \
   "${CONTAINER_NAME}" \
   bash -lc '
     set -euo pipefail
-    export PATH=/opt/uv/bin:/opt/nemo_rl_venv/bin:${PATH}
+    export PATH=/opt/uv/bin:/opt/nemo_rl_venv/bin:/root/.local/bin:${PATH}
     export PYTHONPATH=/workspace/RL:${PYTHONPATH:-}
     export UV_PROJECT_ENVIRONMENT=/opt/nemo_rl_venv
     export UV_PYTHON_INSTALL_DIR=/opt/uv-python
@@ -108,6 +108,36 @@ enroot start \
     export NEMO_GYM_VENV_DIR=/opt/gym_venvs
     export NEMO_GYM_EXTRA_ROOTS=/workspace/RL/examples/nemo_gym_extensions
     export NRL_FORCE_REBUILD_VENVS=false
+
+    # Enroot does not preserve the managed Python the release image installed
+    # under /root, so any stage that starts from an image which has not already
+    # been repaired has to reinstate uv and relink every frozen venv interpreter
+    # before the project can be invoked. This is idempotent: when an earlier
+    # stage already did it, the probe below finds a working uv and skips.
+    #
+    # Being idempotent is what lets this stage build directly on the base image.
+    # The intermediate ns-tools stage bakes servers this run does not use, since
+    # the config_paths of the recipe name only vllm_model, sciprobe_simple_agent,
+    # sciprobe_checks and sciprobe_ns_tools, and the chain deletes ns_tools
+    # outright. Skipping it saves an image and a build.
+    export UV_INSTALL_DIR=/opt/uv/bin
+    if ! command -v uv >/dev/null 2>&1 || ! /opt/nemo_rl_venv/bin/python --version >/dev/null 2>&1; then
+      echo "repairing uv and frozen venv interpreters"
+      mkdir -p "${UV_INSTALL_DIR}" "${UV_PYTHON_INSTALL_DIR}"
+      curl -LsSf https://astral.sh/uv/0.11.28/install.sh | \
+        env UV_INSTALL_DIR="${UV_INSTALL_DIR}" UV_NO_MODIFY_PATH=1 sh
+      hash -r
+      uv python install 3.13.14
+      portable_python="$(uv python find --managed-python --no-project --resolve-links 3.13.14)"
+      test -x "${portable_python}"
+      while IFS= read -r -d "" python_link; do
+        ln -sfn "${portable_python}" "${python_link}"
+      done < <(find /opt/nemo_rl_venv /opt/ray_venvs -type l -name python -print0)
+      ln -sfn /opt/uv/bin/uv /usr/local/bin/uv
+    else
+      echo "uv already present, skipping repair"
+    fi
+    /opt/nemo_rl_venv/bin/python --version
 
     cd /workspace/RL
     uv lock --check
