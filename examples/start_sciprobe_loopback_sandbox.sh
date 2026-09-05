@@ -38,26 +38,15 @@ if [[ "${SCIPROBE_REQUIRE_SECCOMP_NETWORK_BLOCK:-}" != "1" ]]; then
   exit 2
 fi
 : "${SANDBOX_PORTS_DIR:?SANDBOX_PORTS_DIR is required}"
-seccomp_validator=/workspace/validate-sciprobe-sandbox-seccomp.py
-seccomp_hook_dir=/workspace/sciprobe-seccomp-hook
-seccomp_ready_file="${SANDBOX_PORTS_DIR}/sciprobe-seccomp-preflight.ready"
-if [[ ! -r "${seccomp_validator}" ]]; then
-  echo "SciProbe sandbox seccomp validator is not mounted" >&2
-  exit 2
-fi
-if [[ ! -r "${seccomp_hook_dir}/sitecustomize.py" ]]; then
-  echo "SciProbe sandbox seccomp hook is not mounted" >&2
-  exit 2
-fi
-mkdir -p "${SANDBOX_PORTS_DIR}"
-chmod 700 "${SANDBOX_PORTS_DIR}"
-rm -f -- "${seccomp_ready_file}"
-python3 "${seccomp_validator}" --hook-dir "${seccomp_hook_dir}"
-printf '%s\n' '[SCIPROBE_SANDBOX_SECCOMP_PREFLIGHT_OK]' > "${seccomp_ready_file}"
-chmod 400 "${seccomp_ready_file}"
-echo "[SCIPROBE_SANDBOX_SECCOMP_PREFLIGHT_OK]"
-
 # Follow the interpreter indirection when the image uses one.
+#
+# This runs before the seccomp preflight on purpose. The preflight asserts
+# that numpy, pandas and stateful IPython still work under the filter, and
+# those have to be checked against the interpreter that will actually run
+# model code. Selecting it afterwards validated the image default instead,
+# which on a science image is a different and barer interpreter: the checks
+# numpy_pandas_csv_allowed and ipython_stateful_cells_allowed both failed
+# for a missing package rather than for anything the filter did.
 #
 # The stock image puts the uWSGI bind template directly in /start-with-nginx.sh.
 # A science-enriched image replaces that file with a short wrapper that prepends
@@ -80,6 +69,26 @@ if [[ -r /start-with-nginx.real.sh ]]; then
 else
   base_start=/start-with-nginx.sh
 fi
+
+seccomp_validator=/workspace/validate-sciprobe-sandbox-seccomp.py
+seccomp_hook_dir=/workspace/sciprobe-seccomp-hook
+seccomp_ready_file="${SANDBOX_PORTS_DIR}/sciprobe-seccomp-preflight.ready"
+if [[ ! -r "${seccomp_validator}" ]]; then
+  echo "SciProbe sandbox seccomp validator is not mounted" >&2
+  exit 2
+fi
+if [[ ! -r "${seccomp_hook_dir}/sitecustomize.py" ]]; then
+  echo "SciProbe sandbox seccomp hook is not mounted" >&2
+  exit 2
+fi
+mkdir -p "${SANDBOX_PORTS_DIR}"
+chmod 700 "${SANDBOX_PORTS_DIR}"
+rm -f -- "${seccomp_ready_file}"
+python3 "${seccomp_validator}" --hook-dir "${seccomp_hook_dir}"
+printf '%s\n' '[SCIPROBE_SANDBOX_SECCOMP_PREFLIGHT_OK]' > "${seccomp_ready_file}"
+chmod 400 "${seccomp_ready_file}"
+echo "[SCIPROBE_SANDBOX_SECCOMP_PREFLIGHT_OK]"
+
 base_nginx=/etc/nginx/nginx.conf.template
 patched_start=/tmp/sciprobe-start-with-nginx.sh
 patched_nginx=/tmp/sciprobe-nginx.conf.template
