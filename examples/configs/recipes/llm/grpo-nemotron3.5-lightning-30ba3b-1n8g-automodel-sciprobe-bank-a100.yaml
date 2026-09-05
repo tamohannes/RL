@@ -110,7 +110,24 @@ env:
           # and takes the whole run down with it, which is what fifty did. With
           # history reasoning dropped the per-step cost is much lower, so this
           # has room before it approaches 32768.
-          max_steps: 24
+          # Twenty, bounded from both sides by measurement rather than taste.
+          #
+          # Sixteen was too low: on the first probe five of eight rollouts
+          # stopped there having emitted no answer, so the cap produced most of
+          # that group's zeros. Twenty-four was too high, but for an unrelated
+          # reason: generation was clean, and the training step then died in
+          # backward with "Tried to allocate 15.34 GiB" against 14.38 GiB free.
+          # Longer episodes mean longer training sequences, and an 80GB card ran
+          # out by roughly a gigabyte.
+          #
+          # Sixteen trained without trouble and twenty-four missed narrowly, so
+          # twenty keeps the memory profile close to the one that worked while
+          # clearing the 12 to 16 calls the rollouts that did answer actually
+          # used. For reference the upstream recipe for this model runs
+          # max_total_sequence_length 9216 across four nodes; this one asks for
+          # 32768 on one, so the sequence budget is the binding constraint here
+          # and the step cap is how it is spent.
+          max_steps: 20
     ns_tools:
       resources_servers:
         sciprobe_ns_tools:
