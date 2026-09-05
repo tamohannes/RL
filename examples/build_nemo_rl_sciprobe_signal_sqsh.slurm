@@ -14,11 +14,15 @@
 # limitations under the License.
 
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=192G
+# Take the whole node rather than naming a memory figure. The cpu nodes here
+# carry 176GB, so the previous --mem=192G was unsatisfiable and Slurm rejected
+# the job outright with "Requested node configuration is not available".
+#SBATCH --exclusive
 # Account comes from SBATCH_ACCOUNT in the submit environment.
 #SBATCH --partition=cpu
-#SBATCH --time=02:00:00
+# Matches the ns-tools stage. Unpacking, repairing uv, resolving and copying
+# several hundred packages, then re-exporting does not reliably fit in two hours.
+#SBATCH --time=04:00:00
 
 set -euo pipefail
 
