@@ -47,21 +47,15 @@ policy:
     # card; at 80 GB the memory matters more than the recompute.
     activation_checkpointing: true
 
-    # Keep parameters and gradients on the host between uses.
+    # cpu_offload is not available on this path.
     #
-    # The last OOM missed by about 250MB: it asked for 7.28 GiB with 7.02 GiB
-    # free and 65.03 GiB resident. That resident figure is not the KV cache and
-    # is barely affected by the parallelism layout; dropping expert parallelism
-    # from 8 to 2 to give FSDP a data-parallel axis moved it only from 67.98 to
-    # 65.03 GiB. It is the optimizer: TE FusedAdam here keeps bf16 moments but
-    # also master_weights, an fp32 copy of every parameter, so params, grads,
-    # master weights and two moments come to roughly 37GB before activations.
+    # It was tried and it fails during setup with "Attempted to set the storage
+    # of a tensor on device cuda:0 to a storage on different device cpu".
+    # Generation is colocated, so NeMo RL refits the trained weights into the
+    # vLLM engine, and that transfer requires them on the GPU. Offloading
+    # parameters to the host puts them where the refit cannot read them.
     #
-    # Offloading to host memory buys back far more than the margin needed, and
-    # the node has 1.8TB of it. The cost is a slower optimizer step, which is
-    # the cheapest thing to spend here: generation takes 12 to 20 minutes per
-    # step and training takes two or three.
-    cpu_offload: true
+    # The memory this would have saved has to come from more GPUs instead.
     moe_parallelizer:
       ignore_router_for_ac: true
 
