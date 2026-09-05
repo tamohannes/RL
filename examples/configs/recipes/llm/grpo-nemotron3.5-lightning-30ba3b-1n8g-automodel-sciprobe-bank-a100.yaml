@@ -60,20 +60,25 @@ policy:
   # one. 32768 leaves real headroom for tool output while keeping the training
   # sequence short enough to stay within an 80GB card at micro batch 1 with
   # activation checkpointing on.
-  # 16384, set by what the training step can hold rather than by what the
-  # episode would like.
+  # 32768, restored once generation stopped holding half the card.
   #
-  # On this path peak memory has a hard floor: the model forward materialises a
+  # Peak training memory has a floor here: the forward materialises a
   # [batch, seq, vocab] logit tensor and the loss reads it afterwards, so
-  # logprob_chunk_size cannot shrink it. The failed allocation was 16.00 GiB
-  # every time, which is exactly 131072 vocab x 32768 seq x 4 bytes. At 16384 the
-  # same tensor is 8 GiB, which fits the 9 to 14 GiB that was actually free.
+  # logprob_chunk_size cannot shrink it. At 32768 that tensor is 16 GiB
+  # (131072 vocab x 32768 x 4 bytes) and at 16384 it is 8 GiB.
   #
-  # Megatron has use_fused_linear_logprobs, which avoids materialising it at all
-  # and is documented as taking the trainable length past 100K. It is not
-  # available on the DTensor automodel path this recipe uses, so it is the
-  # obvious thing to revisit if longer episodes turn out to matter.
-  max_total_sequence_length: 16384
+  # Shrinking it to 8 GiB was treating the symptom. The OOM that explained the
+  # rest asked for 8.00 GiB and failed with 6.38 GiB free because 68.95 GiB was
+  # already allocated, most of it reserved by colocated generation. With
+  # gpu_memory_utilization at 0.3 there is room for the 16 GiB tensor again, and
+  # 16384 was too short for these episodes: it traded OOM for context overflow,
+  # three rollouts on step 2.
+  #
+  # If a longer window is ever needed than this, Megatron's
+  # use_fused_linear_logprobs avoids materialising the tensor at all and is
+  # documented as reaching past 100K. It is not available on the DTensor
+  # automodel path this recipe uses.
+  max_total_sequence_length: 32768
 
   # Chunk the logprob computation along the sequence.
   #
@@ -110,7 +115,7 @@ policy:
     #
     # 1536 is still a substantial turn: the traces show a few paragraphs of
     # reasoning and a short code block, nothing near even the old 8192.
-    max_new_tokens: 1536
+    max_new_tokens: 3072
 
     vllm_cfg:
       # Give generation less of the card so training can have more.
