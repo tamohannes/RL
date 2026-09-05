@@ -98,7 +98,19 @@ policy:
     # paragraphs. Spending the sequence budget on more turns rather than on a
     # larger per-turn ceiling is the trade that keeps both the step cap and the
     # training step alive.
-    max_new_tokens: 3072
+    # 1536, which is arithmetic rather than preference. Twenty steps have to fit
+    # inside 16384 along with the task and the tool output, so the per-turn
+    # ceiling is the only free variable left.
+    #
+    # The two failures bracket it. At 32768 with 3072 per turn the training step
+    # died on the logit tensor. At 16384 with 3072 the training step was fine and
+    # generation overflowed instead, three rollouts on step 2. The window that
+    # trains and the window an episode wants do not overlap at that per-turn
+    # size, so the per-turn size is what moves.
+    #
+    # 1536 is still a substantial turn: the traces show a few paragraphs of
+    # reasoning and a short code block, nothing near even the old 8192.
+    max_new_tokens: 1536
 
   tokenizer:
     chat_template_kwargs:
