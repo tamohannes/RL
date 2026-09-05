@@ -22,6 +22,7 @@ filter in that child before its target, and therefore before model code, runs.
 
 from __future__ import annotations
 
+import builtins
 import ctypes
 import errno
 import io
@@ -259,9 +260,33 @@ class _LandlockPathBeneathAttr(ctypes.Structure):
 
 
 class _RestrictedUnpickler(pickle.Unpickler):
-    """Unpickle primitive control messages without importing or calling code."""
+    """Unpickle primitive control messages without importing or calling code.
+
+    Built-in exception types are the one exception to that, and they have to be,
+    because refusing them does not stop an attack; it destroys the session.
+
+    Python's multiprocessing returns a worker's exception by pickling it back
+    over the control pipe. Refusing ``builtins.IndexError`` meant that any
+    uncaught error in model code took the whole interactive session with it:
+    variables, imports and working directory. Reading 2357 real tool cells found
+    not one containing the word "Traceback", and rollouts re-running the same
+    failing import five times because they were never told what went wrong.
+
+    Resolving a builtin exception class is not the capability this guard exists
+    to deny. The dangerous globals are callables like ``os.system``,
+    ``builtins.eval`` or ``subprocess.Popen``, which reconstruct into something
+    that executes. An exception class reconstructs into a value holding a
+    message. The check below is deliberately narrow: the module must be
+    ``builtins``, the attribute must already exist there, it must be a class,
+    and it must derive from BaseException. Nothing else resolves, and no module
+    is imported to decide.
+    """
 
     def find_class(self, module: str, name: str) -> object:
+        if module == "builtins":
+            candidate = getattr(builtins, name, None)
+            if isinstance(candidate, type) and issubclass(candidate, BaseException):
+                return candidate
         raise pickle.UnpicklingError(
             f"global references are forbidden: {module}.{name}"
         )
@@ -284,12 +309,18 @@ def _install_restricted_connection_unpickler() -> None:
         return
 
     def restricted_recv(self: _ConnectionBase) -> object:
+        # Closing on a refused payload is what turned a refusal into a lost
+        # session. Separate the two failures: a transport error means the pipe
+        # is already unusable and closing is right, while a refused pickle means
+        # the pipe is fine and only this message is unacceptable. The message
+        # boundary is intact either way, because recv_bytes consumed a whole
+        # frame before the unpickler ever saw it.
         try:
             payload = self.recv_bytes(maxlength=_MAX_CONTROL_MESSAGE_BYTES)
-            return _restricted_loads(payload)
         except Exception:
             self.close()
             raise
+        return _restricted_loads(payload)
 
     restricted_recv._sciprobe_restricted_unpickler = True
     _ConnectionBase.recv = restricted_recv
