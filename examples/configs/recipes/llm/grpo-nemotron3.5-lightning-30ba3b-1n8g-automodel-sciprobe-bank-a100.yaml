@@ -47,6 +47,22 @@ policy:
   # activation checkpointing on.
   max_total_sequence_length: 32768
 
+  tokenizer:
+    chat_template_kwargs:
+      # Drop earlier turns' reasoning from the prompt.
+      #
+      # The chain inherits truncate_history_thinking false alongside
+      # enable_thinking true, so every turn's full chain of thought stays in the
+      # prompt for every later turn. On a multi-turn tool episode that is the
+      # dominant term, and it is what exhausts the window: at both 12288 and
+      # 32768 the overflow was exactly 25 tokens, because a generation is clamped
+      # to end exactly at the limit and the next turn's template scaffolding then
+      # does not fit. That is structural, so a larger window only postpones it.
+      #
+      # Tool calls and their results are still carried; only the reasoning is
+      # dropped, which is how these models are meant to be driven across turns.
+      truncate_history_thinking: true
+
 checkpointing:
   # The signal canary allowed 50 minutes because it ran a single step. A bank
   # step is four probes wide and the model load alone costs a good part of that.
