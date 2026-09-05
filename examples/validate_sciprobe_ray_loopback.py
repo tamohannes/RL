@@ -363,7 +363,9 @@ def _scan_token_in_tree(
     }
 
 
-def _run_unauthenticated_probe() -> tuple[bool, int, str]:
+def _run_unauthenticated_probe(
+    dashboard_host: str = RAY_LOOPBACK_HOST,
+) -> tuple[bool, int, str]:
     child_code = """
 import ray
 ray.init(address="127.0.0.1:1200", _node_ip_address="127.0.0.1")
@@ -402,7 +404,11 @@ ray.get(ray.put("unauthenticated-probe"))
     if child_returncode == 0:
         raise RuntimeError("unauthenticated Ray subprocess was not denied")
 
-    request = urllib.request.Request("http://127.0.0.1:8265/api/version")
+    # The dashboard is on the head node, which is loopback only when the driver
+    # shares that node. On a multi-node cluster it answers on the head's routable
+    # address, and probing loopback would fail to connect for a reason that has
+    # nothing to do with whether it demands a token.
+    request = urllib.request.Request(f"http://{dashboard_host}:8265/api/version")
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
         with opener.open(request, timeout=5) as response:
@@ -651,6 +657,13 @@ def main(
                 unauthenticated_driver_rpc_status = "UNAUTHENTICATED"
 
         node_addresses = _non_loopback_ipv4_addresses()
+        # Where to probe the dashboard for a 401. Loopback when the bind is
+        # loopback; otherwise the address Ray actually advertised.
+        dashboard_probe_host = RAY_LOOPBACK_HOST
+        if not loopback_expected:
+            advertised = ray_diagnostics.get("global_node_ip")
+            if isinstance(advertised, str) and advertised:
+                dashboard_probe_host = advertised
         explicit_ray_pids = {os.getpid()}
         if probe_actor_pid is not None:
             explicit_ray_pids.add(probe_actor_pid)
@@ -725,7 +738,7 @@ def main(
                 unauthenticated_connection_rejected,
                 unauthenticated_dashboard_status,
                 unauthenticated_subprocess_outcome,
-            ) = _run_unauthenticated_probe()
+            ) = _run_unauthenticated_probe(dashboard_host=dashboard_probe_host)
             assert ray_module is not None and probe_actor is not None
             _, post_value = ray_module.get(
                 probe_actor.ping.remote("after-unauthenticated-probe")
