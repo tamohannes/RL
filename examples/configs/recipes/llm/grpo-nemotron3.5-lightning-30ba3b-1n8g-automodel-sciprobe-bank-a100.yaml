@@ -112,6 +112,22 @@ policy:
     # reasoning and a short code block, nothing near even the old 8192.
     max_new_tokens: 1536
 
+    vllm_cfg:
+      # Give generation less of the card so training can have more.
+      #
+      # The last OOM is the one that explains the earlier ones. The allocation
+      # was 8.00 GiB, exactly the logit tensor at 16384, and it failed with 6.38
+      # GiB free because 68.95 GiB was already allocated. Training was never
+      # working with 80GB. Generation is colocated and holds
+      # gpu_memory_utilization of the card, so at 0.5 roughly 40GB was reserved
+      # before training asked for anything.
+      #
+      # 0.3 is affordable by measurement, not by guess: at 0.5 the engine
+      # reported a KV cache of 1,635,914 tokens, and eight concurrent rollouts at
+      # 16384 need about 131k. Even after the weights take their share this
+      # leaves several times the requirement.
+      gpu_memory_utilization: 0.3
+
   tokenizer:
     chat_template_kwargs:
       # Drop earlier turns' reasoning from the prompt.
