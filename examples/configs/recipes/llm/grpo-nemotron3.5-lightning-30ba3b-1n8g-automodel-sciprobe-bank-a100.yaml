@@ -60,7 +60,20 @@ policy:
   # one. 32768 leaves real headroom for tool output while keeping the training
   # sequence short enough to stay within an 80GB card at micro batch 1 with
   # activation checkpointing on.
-  max_total_sequence_length: 32768
+  # 16384, set by what the training step can hold rather than by what the
+  # episode would like.
+  #
+  # On this path peak memory has a hard floor: the model forward materialises a
+  # [batch, seq, vocab] logit tensor and the loss reads it afterwards, so
+  # logprob_chunk_size cannot shrink it. The failed allocation was 16.00 GiB
+  # every time, which is exactly 131072 vocab x 32768 seq x 4 bytes. At 16384 the
+  # same tensor is 8 GiB, which fits the 9 to 14 GiB that was actually free.
+  #
+  # Megatron has use_fused_linear_logprobs, which avoids materialising it at all
+  # and is documented as taking the trainable length past 100K. It is not
+  # available on the DTensor automodel path this recipe uses, so it is the
+  # obvious thing to revisit if longer episodes turn out to matter.
+  max_total_sequence_length: 16384
 
   # Chunk the logprob computation along the sequence.
   #
@@ -76,6 +89,16 @@ policy:
   # OOM (especially during backward pass)". It is honoured on this path by
   # nemo_rl/models/automodel/train.py.
   logprob_chunk_size: 2048
+
+  generation:
+    # 3072 per turn instead of 8192. The budget is per generation, and an episode
+    # accumulates every turn into one prompt, so this is what actually decides
+    # how long a twenty-step episode gets. The traces do not need 8192: the tool
+    # calls are short snippets and the reasoning between them is a few
+    # paragraphs. Spending the sequence budget on more turns rather than on a
+    # larger per-turn ceiling is the trade that keeps both the step cap and the
+    # training step alive.
+    max_new_tokens: 3072
 
   tokenizer:
     chat_template_kwargs:
