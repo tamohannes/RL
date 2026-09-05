@@ -103,7 +103,19 @@ export SANDBOX_COMMAND="${SANDBOX_COMMAND:-unshare --pid --fork --mount-proc --k
 # The sandbox sees the policy tree and nothing else of the bank: no checks.py, no
 # gold, no other probe's grader copy.
 export SANDBOX_EXTRA_MOUNTS="${BANK_DIR}/policy:/workspace/sciprobe-probe:ro,${CODE_DIR}/examples/sandbox_seccomp_hook:/workspace/sciprobe-seccomp-hook:ro,${CODE_DIR}/examples/validate_sciprobe_sandbox_seccomp.py:/workspace/validate-sciprobe-sandbox-seccomp.py:ro,${CODE_DIR}/examples/start_sciprobe_loopback_sandbox.sh:/workspace/start-sciprobe-loopback-sandbox.sh:ro"
+# Lowest Landlock ABI the sandbox will accept. Left unset the hook holds its
+# strict floor of 3 and refuses to start on an older kernel. Set it only for a
+# cluster whose kernel cannot reach that floor, and only after checking what the
+# kernel still enforces: below 3 the sandbox gives up rename and truncate
+# confinement, which govern modifying files it can already open, while the
+# network block and the read rules are ABI 1 and remain in force.
+SCIPROBE_LANDLOCK_MIN_ABI="${SCIPROBE_LANDLOCK_MIN_ABI:-}"
+
 export SANDBOX_ENV_VARS="NEMO_SKILLS_SANDBOX_BLOCK_NETWORK=1,SCIPROBE_REQUIRE_SECCOMP_NETWORK_BLOCK=1,PYTHONPATH=/workspace/sciprobe-seccomp-hook,NUM_WORKERS=1,SANDBOX_FORCE_SINGLE_NODE=1"
+if [[ -n "${SCIPROBE_LANDLOCK_MIN_ABI}" ]]; then
+  SANDBOX_ENV_VARS="${SANDBOX_ENV_VARS},SCIPROBE_LANDLOCK_MIN_ABI=${SCIPROBE_LANDLOCK_MIN_ABI}"
+  export SANDBOX_ENV_VARS
+fi
 export SCIPROBE_REQUIRE_SANDBOX_SECCOMP_PREFLIGHT=1
 export NEMO_SKILLS_SANDBOX_HOST=127.0.0.1
 export NEMO_SKILLS_SANDBOX_PORT=6000
@@ -193,6 +205,7 @@ echo "probe_bank_root=${SCIPROBE_PROBE_BANK_ROOT}"
 echo "checker_python=${SCIPROBE_CHECKER_PYTHON}"
 echo "sandbox_mount=${BANK_DIR}/policy:/workspace/sciprobe-probe:ro"
 echo "nodes=${SLURM_NODES} gpus_per_node=${SLURM_GPUS_PER_NODE}"
+echo "landlock_min_abi=${SCIPROBE_LANDLOCK_MIN_ABI:-3 (strict default)}"
 
 if [[ "${DRY_RUN}" == "true" ]]; then
   printf 'sbatch_cmd='

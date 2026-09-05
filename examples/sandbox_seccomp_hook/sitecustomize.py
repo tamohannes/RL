@@ -77,7 +77,10 @@ _IOPRIO_WHO_PROCESS: Final = 1
 
 _LANDLOCK_CREATE_RULESET_VERSION: Final = 1
 _LANDLOCK_RULE_PATH_BENEATH: Final = 1
-_MIN_LANDLOCK_ABI: Final = 3
+_DEFAULT_MIN_LANDLOCK_ABI: Final = 3
+_MIN_LANDLOCK_ABI_ENV: Final = "SCIPROBE_LANDLOCK_MIN_ABI"
+_LANDLOCK_EFFECTIVE_ABI_ENV: Final = "SCIPROBE_LANDLOCK_EFFECTIVE_ABI"
+_LANDLOCK_MISSING_CONTROLS_ENV: Final = "SCIPROBE_LANDLOCK_MISSING_CONTROLS"
 _LANDLOCK_ACCESS_FS_EXECUTE: Final = 1 << 0
 _LANDLOCK_ACCESS_FS_WRITE_FILE: Final = 1 << 1
 _LANDLOCK_ACCESS_FS_READ_FILE: Final = 1 << 2
@@ -737,12 +740,51 @@ def _install_seccomp_filter() -> None:
     os.environ[_PROCESS_FILTER_ACTIVE_ENV] = "1"
 
 
+def _minimum_landlock_abi() -> int:
+    """Lowest Landlock ABI this sandbox will accept.
+
+    Defaults to the strict floor. A cluster whose kernel predates an ABI can
+    lower it, but only by saying so explicitly, because doing so gives up real
+    controls and the run should not decide that quietly on its own.
+    """
+    configured = os.environ.get(_MIN_LANDLOCK_ABI_ENV, "").strip()
+    if not configured:
+        return _DEFAULT_MIN_LANDLOCK_ABI
+    try:
+        minimum = int(configured)
+    except ValueError:
+        raise RuntimeError(
+            f"{_MIN_LANDLOCK_ABI_ENV} must be an integer, got {configured!r}"
+        ) from None
+    if not 1 <= minimum <= _DEFAULT_MIN_LANDLOCK_ABI:
+        raise RuntimeError(
+            f"{_MIN_LANDLOCK_ABI_ENV} must be between 1 and "
+            f"{_DEFAULT_MIN_LANDLOCK_ABI}, got {minimum}"
+        )
+    return minimum
+
+
 def _landlock_handled_access(abi_version: int) -> int:
-    if abi_version < _MIN_LANDLOCK_ABI:
+    minimum = _minimum_landlock_abi()
+    if abi_version < minimum:
         raise RuntimeError(
             "Landlock ABI does not support safe truncation isolation: "
-            f"required >= {_MIN_LANDLOCK_ABI}, found {abi_version}"
+            f"required >= {minimum}, found {abi_version}"
         )
+    # Record what the kernel could actually enforce. Read confinement and the
+    # write, create and delete controls are all ABI 1, so the properties this
+    # sandbox depends on to keep a grader unreadable survive an older kernel.
+    # What is lost below ABI 3 is rename and truncate confinement, which matter
+    # for paths the model can already open for writing.
+    missing = []
+    if abi_version < 2:
+        missing.append("refer")
+    if abi_version < 3:
+        missing.append("truncate")
+    if abi_version < 5:
+        missing.append("ioctl_dev")
+    os.environ[_LANDLOCK_EFFECTIVE_ABI_ENV] = str(abi_version)
+    os.environ[_LANDLOCK_MISSING_CONTROLS_ENV] = ",".join(missing)
     access = (
         _LANDLOCK_ACCESS_FS_EXECUTE
         | _LANDLOCK_ACCESS_FS_WRITE_FILE
