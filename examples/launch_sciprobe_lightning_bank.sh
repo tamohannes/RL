@@ -70,6 +70,11 @@ TRAIN_PATH="$(realpath "${TRAIN_PATH:-${BANK_DIR}/train.jsonl}")"
 # import torch quietly yields a namespace package with __file__ None and
 # torch.nn.functional does not exist. Mount the same cache at the path the
 # links record.
+#
+# This sets UV_CACHE_DIR_OVERRIDE rather than adding a mount. ray.sub already
+# mounts that variable at /root/.cache/uv, so a second mount on the same target
+# only shadows it, and whichever came last won: the first attempt at this
+# mounted the real cache and then had ray.sub cover it with an empty directory.
 IMAGE_UV_CACHE="${IMAGE_UV_CACHE:-}"
 if [[ -n "${IMAGE_UV_CACHE}" ]]; then
   IMAGE_UV_CACHE="$(realpath "${IMAGE_UV_CACHE}")"
@@ -101,7 +106,7 @@ CHECKPOINT_DIR="${RUN_ROOT}/checkpoints"
 LOGGER_DIR="${RUN_ROOT}/logs"
 NEMO_GYM_LOG_DIR="${RUN_ROOT}/nemo-gym"
 RAY_LOG_DIR="${RUN_ROOT}/ray"
-UV_CACHE_DIR_OVERRIDE="${PERSISTENT_ROOT}/cache/uv"
+UV_CACHE_DIR_OVERRIDE="${IMAGE_UV_CACHE:-${PERSISTENT_ROOT}/cache/uv}"
 HF_HOME="${PERSISTENT_ROOT}/cache/huggingface"
 export SCIPROBE_CAPABILITY_STORE_PATH
 
@@ -153,9 +158,6 @@ export WANDB_MODE=offline
 export BASE_LOG_DIR="${RAY_LOG_DIR}"
 export CONTAINER_WORKDIR="${CONTAINER_CODE_DIR}"
 export MOUNTS="${CODE_DIR}:${CONTAINER_CODE_DIR},${MODEL_PATH}:${MODEL_PATH}:ro,${PERSISTENT_ROOT}:${PERSISTENT_ROOT}"
-if [[ -n "${IMAGE_UV_CACHE}" ]]; then
-  export MOUNTS="${MOUNTS},${IMAGE_UV_CACHE}:/root/.cache/uv:ro"
-fi
 
 export SCIPROBE_PROBE_BANK_ROOT="${BANK_DIR}/grader"
 export SCIPROBE_CHECKER_PYTHON="${GRADING_PYTHON}"
