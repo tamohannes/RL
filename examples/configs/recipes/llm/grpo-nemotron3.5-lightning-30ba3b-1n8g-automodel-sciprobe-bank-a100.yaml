@@ -99,12 +99,18 @@ env:
           # is clamped to end exactly at the limit and the next turn's template
           # then does not fit. The window was never the variable.
           #
-          # Sixteen is well above what these probes need, which is read the data,
-          # compute, check, answer. It is far below the point where the prompt
-          # can reach 32768, and it matches what we already measured elsewhere:
-          # tool-call spirals set in around six or seven calls, after which the
-          # model is losing track rather than making progress.
-          max_steps: 16
+          # Twenty-four, measured rather than guessed. Sixteen was the first
+          # try and it was too tight: on the first probe five of eight rollouts
+          # stopped at exactly sixteen calls having emitted no answer, so the
+          # cap and not the model produced most of that group's zeros. The three
+          # that did finish used twelve and thirteen calls, so the working range
+          # sits just above the old ceiling.
+          #
+          # Still a cap, because an unbounded episode fills the context window
+          # and takes the whole run down with it, which is what fifty did. With
+          # history reasoning dropped the per-step cost is much lower, so this
+          # has room before it approaches 32768.
+          max_steps: 24
     ns_tools:
       resources_servers:
         sciprobe_ns_tools:
