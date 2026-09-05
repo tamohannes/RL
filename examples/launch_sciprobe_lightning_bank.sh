@@ -151,7 +151,18 @@ export NEMO_GYM_VENV_DIR=/opt/gym_venvs
 export NEMO_RL_VENV_DIR=/opt/ray_venvs
 export NEMO_GYM_EXTRA_ROOTS="${RUNTIME_EXTENSIONS}"
 export GPUS_PER_NODE="${SLURM_GPUS_PER_NODE}"
-export RAY_LOOPBACK_ONLY=1
+# Loopback binding is a one-node property; token auth is not. Ray must reach
+# workers on other hosts, so the bind opens on multi-node while the token stays
+# on. What protects a result is the per-node sandbox seccomp filter, which is
+# unchanged either way.
+if [[ "${SLURM_NODES}" == "1" ]]; then
+  export RAY_LOOPBACK_ONLY=1
+  RAY_EXPECT_BIND=loopback
+else
+  export RAY_LOOPBACK_ONLY=0
+  RAY_EXPECT_BIND=all
+fi
+export RAY_TOKEN_AUTH=1
 export NRL_FORCE_REBUILD_VENVS=false
 export UV_CACHE_DIR_OVERRIDE HF_HOME
 export WANDB_MODE=offline
@@ -177,7 +188,7 @@ export COMMAND="export PATH=/opt/uv/bin:/opt/nemo_rl_venv/bin:\${PATH} && \
   ray_session_log_dir=\$(readlink -f /tmp/ray/session_latest/logs) && \
   test -d \"\${ray_session_log_dir}\" && \
   uv run --locked --no-sync python examples/validate_sciprobe_ray_loopback.py \
-    --require-worker --require-token-auth --ray-log-dir \"\${ray_session_log_dir}\" && \
+    --require-worker --require-token-auth --expect-bind ${RAY_EXPECT_BIND} --ray-log-dir \"\${ray_session_log_dir}\" && \
   test -x /opt/ray_venvs/nemo_rl.environments.nemo_gym.NemoGym/bin/python && \
   /opt/ray_venvs/nemo_rl.environments.nemo_gym.NemoGym/bin/python -c 'import nemo_gym, openai' && \
   /opt/ray_venvs/nemo_rl.environments.nemo_gym.NemoGym/bin/python \
@@ -205,6 +216,8 @@ export COMMAND="export PATH=/opt/uv/bin:/opt/nemo_rl_venv/bin:\${PATH} && \
     data.train.data_path=${TRAIN_PATH} \
     checkpointing.checkpoint_dir=${CHECKPOINT_DIR} \
     logger.log_dir=${LOGGER_DIR} \
+    cluster.num_nodes=${SLURM_NODES} \
+    cluster.gpus_per_node=${SLURM_GPUS_PER_NODE} \
     logger.wandb.name=lightning-bank-${RUN_ID} \
     env.nemo_gym.nemo_gym_log_dir=${NEMO_GYM_LOG_DIR}"
 

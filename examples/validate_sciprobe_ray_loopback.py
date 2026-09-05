@@ -576,8 +576,20 @@ def main(
     *,
     require_worker: bool = False,
     require_token_auth: bool = False,
+    expect_bind: str = "loopback",
     ray_log_dir: Path | None = None,
 ) -> None:
+    """Validate the Ray control plane.
+
+    ``expect_bind`` separates two properties that are only the same thing on one
+    node. ``loopback`` asserts Ray listens on 127.0.0.1 and nothing else, which a
+    multi-node job cannot satisfy because Ray must reach workers on other hosts.
+    ``all`` drops the bind assertions and keeps every authentication assertion,
+    which is what still protects the control plane once the bind opens.
+    """
+    if expect_bind not in ("loopback", "all"):
+        raise ValueError(f"expect_bind must be loopback or all, got {expect_bind!r}")
+    loopback_expected = expect_bind == "loopback"
     ray_module = None
     probe_actor = None
     probe_actor_pid = None
@@ -622,7 +634,7 @@ def main(
                     raise RuntimeError("driver CoreWorker address is unavailable")
                 driver_ip = str(driver_address["ip"])
                 driver_port = int(driver_address["port"])
-                if not _is_expected_ray_loopback(driver_ip):
+                if loopback_expected and not _is_expected_ray_loopback(driver_ip):
                     raise RuntimeError(
                         "driver CoreWorker advertised a non-loopback address: "
                         f"{driver_ip}:{driver_port}"
@@ -657,7 +669,7 @@ def main(
             for listener in ray_listeners
             if not _is_expected_ray_loopback(str(listener["address"]))
         ]
-        if proc_exposed:
+        if proc_exposed and loopback_expected:
             raise RuntimeError(
                 "Ray control-plane listener is not loopback-only: "
                 + json.dumps(
@@ -670,7 +682,7 @@ def main(
             )
 
         known_port_exposed = _non_loopback_control_listeners()
-        if known_port_exposed:
+        if known_port_exposed and loopback_expected:
             raise RuntimeError(
                 "known Ray control-plane listener is not loopback-only: "
                 + json.dumps(known_port_exposed, sort_keys=True)
@@ -682,13 +694,13 @@ def main(
             for port in RAY_CONTROL_PORTS
             if _connects(address, port)
         ]
-        if exposed:
+        if exposed and loopback_expected:
             raise RuntimeError(
                 "Ray control-plane port reachable through node network: "
                 + ", ".join(exposed)
             )
 
-        required_loopback = [1200, 8265]
+        required_loopback = [1200, 8265] if loopback_expected else []
         missing_loopback = [
             port
             for port in required_loopback
@@ -772,10 +784,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--require-worker", action="store_true")
     parser.add_argument("--require-token-auth", action="store_true")
+    parser.add_argument(
+        "--expect-bind",
+        choices=("loopback", "all"),
+        default="loopback",
+        help="loopback asserts Ray binds 127.0.0.1 only; all keeps just the auth checks",
+    )
     parser.add_argument("--ray-log-dir", type=Path)
     args = parser.parse_args()
     main(
         require_worker=args.require_worker,
         require_token_auth=args.require_token_auth,
+        expect_bind=args.expect_bind,
         ray_log_dir=args.ray_log_dir,
     )

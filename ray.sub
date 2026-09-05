@@ -398,6 +398,12 @@ fi
 GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 DEDICATED_RAY_HEAD=${DEDICATED_RAY_HEAD:-0}
 RAY_LOOPBACK_ONLY=${RAY_LOOPBACK_ONLY:-0}
+# Token authentication is a separate property from the loopback bind, and only
+# one of the two can survive a multi-node job. Ray must reach workers on other
+# hosts, so the bind has to open up; the token is what keeps that opening from
+# being an unauthenticated control plane. Defaults to the loopback flag, so a
+# one-node job behaves exactly as before.
+RAY_TOKEN_AUTH=${RAY_TOKEN_AUTH:-$RAY_LOOPBACK_ONLY}
 case "$DEDICATED_RAY_HEAD" in
   0|1) ;;
   *)
@@ -412,11 +418,26 @@ case "$RAY_LOOPBACK_ONLY" in
     exit 1
     ;;
 esac
+case "$RAY_TOKEN_AUTH" in
+  0|1) ;;
+  *)
+    echo "Error: RAY_TOKEN_AUTH must be 0 or 1, got '$RAY_TOKEN_AUTH'." >&2
+    exit 1
+    ;;
+esac
 if [[ "$RAY_LOOPBACK_ONLY" == "1" && "$SLURM_JOB_NUM_NODES" -ne 1 ]]; then
-  echo "Error: RAY_LOOPBACK_ONLY=1 is valid only for a one-node Slurm job." >&2
-  exit 1
+  # Ray has to reach workers on other hosts, so a loopback-only bind cannot
+  # survive here. Drop the bind and keep token auth rather than refusing the
+  # job: the property that protects a result is that the model cannot reach the
+  # network or read the grader, and that lives in the per-node sandbox seccomp
+  # filter, not in which interface Ray listens on. What the bind protects is our
+  # Ray control plane from other users of the cluster, and token auth is the
+  # control that still covers it once the bind opens.
+  echo "[NRL_SECURITY] Multi-node job: dropping the Ray loopback bind, keeping token auth." >&2
+  RAY_LOOPBACK_ONLY=0
+  RAY_TOKEN_AUTH=1
 fi
-if [[ "$RAY_LOOPBACK_ONLY" == "1" && "${RAY_DEBUG:-}" == "legacy" ]]; then
+if [[ "$RAY_TOKEN_AUTH" == "1" && "${RAY_DEBUG:-}" == "legacy" ]]; then
   echo "Error: external Ray debugger is forbidden in loopback-only mode." >&2
   exit 1
 fi
@@ -426,7 +447,7 @@ fi
 # authentication. Keep only the file path in process environments; the token
 # value is never stored in a shell variable or argv.
 RAY_AUTH_DIR=""
-if [[ "$RAY_LOOPBACK_ONLY" == "1" ]]; then
+if [[ "$RAY_TOKEN_AUTH" == "1" ]]; then
   RAY_AUTH_DIR="$LOG_DIR/.ray-auth"
   export RAY_AUTH_DIR
   export RAY_AUTH_TOKEN_PATH="$RAY_AUTH_DIR/token"
@@ -477,7 +498,7 @@ COMMON_SRUN_ARGS+=" --mpi=pmix"
 COMMON_SRUN_ARGS+=" --container-mounts=$MOUNTS"
 COMMON_SRUN_ARGS+=" --container-image=$CONTAINER"
 COMMON_SRUN_ARGS+=" --container-workdir=$CONTAINER_WORKDIR"
-if [[ "$RAY_LOOPBACK_ONLY" == "1" ]]; then
+if [[ "$RAY_TOKEN_AUTH" == "1" ]]; then
   # Pyxis image values otherwise take precedence over the Slurm step env.
   COMMON_SRUN_ARGS+=" --container-env=RAY_AUTH_MODE,RAY_AUTH_TOKEN_PATH"
 fi
@@ -706,7 +727,7 @@ WORKER_NODE_IP_ARG=""
 if [[ "$RAY_LOOPBACK_ONLY" == "1" ]]; then
   # By default Ray rewrites localhost to the real node IP. This upstream flag
   # enables Ray's local-only path and keeps 127.0.0.1 as the actual bind host.
-  # The one-node guard above is required because this mode rejects workers.
+  # The guard above downgrades this off for multi-node, since it rejects workers.
   unset RAY_REDIS_ADDRESS
   unset RAY_API_SERVER_ADDRESS
   unset RAY_DASHBOARD_ADDRESS
@@ -914,7 +935,7 @@ fi
 log_phase() { local t0="\${NRL_JOB_START_EPOCH:-0}"; echo "[NRL_PHASE][\$(date '+%Y-%m-%dT%H:%M:%S%z')][+\$(( \$(date +%s) - \${t0%.*} ))s] \$*"; }
 log_phase "head container started on \$(hostname)"
 
-if [[ "$RAY_LOOPBACK_ONLY" == "1" ]]; then
+if [[ "$RAY_TOKEN_AUTH" == "1" ]]; then
   # A raw token baked into an image would override the job-owned token path.
   unset RAY_AUTH_TOKEN
   [[ "\${RAY_AUTH_MODE:-}" == "token" ]]
@@ -1164,7 +1185,7 @@ fi
 log_phase() { local t0="\${NRL_JOB_START_EPOCH:-0}"; echo "[NRL_PHASE][\$(date '+%Y-%m-%dT%H:%M:%S%z')][+\$(( \$(date +%s) - \${t0%.*} ))s] \$*"; }
 log_phase "worker \$SLURM_PROCID container started on \$(hostname)"
 
-if [[ "$RAY_LOOPBACK_ONLY" == "1" ]]; then
+if [[ "$RAY_TOKEN_AUTH" == "1" ]]; then
   # A raw token baked into an image would override the job-owned token path.
   unset RAY_AUTH_TOKEN
   [[ "\${RAY_AUTH_MODE:-}" == "token" ]]

@@ -1,0 +1,52 @@
+# GRPO over a SciProbe bank on two nodes of 8x A100 80GB.
+#
+# One node cannot hold this. Every single-node lever was tried and measured:
+# generation's share of the card (0.5 -> 0.3) moved resident memory 68.95 -> 67.98
+# GiB, expert parallelism (8 -> 2, to give FSDP a data-parallel axis) moved it
+# 67.98 -> 65.03, logprob_chunk_size did nothing because the forward has already
+# materialised the logit tensor by the time it applies, and cpu_offload fails
+# outright against colocated generation, which refits weights from the GPU. The
+# memory has to come from more GPUs.
+#
+# Two, not four. data_parallel_size is the inferred dimension of
+# np.arange(world).reshape(pp, -1, cp, tp), so ep does not divide out and dp
+# equals the world size here. The training batch must divide by dp, and
+# force_on_policy_ratio pins train_global_batch_size to
+# num_prompts_per_step * num_generations_per_prompt with prompts fixed at 1 by
+# the synchronous Gym path. So the group size is the world size: 16 on two
+# nodes, 32 on four. Tool execution is serialised cluster-wide, one sandbox
+# worker, so group size multiplies the rollout phase directly and four nodes
+# would not fit six steps in a four hour wall.
+#
+# The wider group is not only a cost. A zero gradient here comes from every
+# rollout in a group agreeing, and sixteen samples find a disagreement more often
+# than eight, which is the whole point of the exercise.
+defaults: grpo-nemotron3.5-lightning-30ba3b-1n8g-automodel-sciprobe-bank-a100.yaml
+
+grpo:
+  num_prompts_per_step: 1
+  num_generations_per_prompt: 16
+  # Four steps, not six. A group of sixteen roughly doubles the rollout phase
+  # against the eight-wide runs that took 12 to 20 minutes, and the wall is four
+  # hours including a model load.
+  max_num_steps: 4
+
+policy:
+  # dp is 16 here, and both grpo.py and batched_data_dict require the global
+  # batch to divide by it as well as to equal prompts times generations.
+  train_global_batch_size: 16
+
+  dtensor_cfg:
+    # Back to 8, which is what two nodes make correct rather than merely
+    # tolerable. _create_moe_mesh orders the axes with EP innermost, so with 16
+    # ranks an expert-parallel group is ranks 0-7, one whole node, and the MoE
+    # all-to-all stays on the intra-node fabric. ep=16 would put every dispatch
+    # across the wire, and this recipe uses the generic torch dispatcher.
+    expert_parallel_size: 8
+    # Not available with colocated generation: the refit reads parameters from
+    # the GPU and fails with a cuda/cpu storage mismatch.
+    cpu_offload: false
+
+cluster:
+  gpus_per_node: 8
+  num_nodes: 2
