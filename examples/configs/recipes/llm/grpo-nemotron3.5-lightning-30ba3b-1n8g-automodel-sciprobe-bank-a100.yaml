@@ -135,19 +135,25 @@ policy:
 
   tokenizer:
     chat_template_kwargs:
-      # Drop earlier turns' reasoning from the prompt.
+      # Keep earlier turns' reasoning. This was briefly set true to shorten
+      # episodes and that was wrong twice over.
       #
-      # The chain inherits truncate_history_thinking false alongside
-      # enable_thinking true, so every turn's full chain of thought stays in the
-      # prompt for every later turn. On a multi-turn tool episode that is the
-      # dominant term, and it is what exhausts the window: at both 12288 and
-      # 32768 the overflow was exactly 25 tokens, because a generation is clamped
-      # to end exactly at the limit and the next turn's template scaffolding then
-      # does not fit. That is structural, so a larger window only postpones it.
+      # It desynchronised the two token streams. NeMo RL does not build the
+      # training sequence separately from the rollout: it stitches the literal
+      # rollout tokens under a prefix invariant, and that check names this exact
+      # cause when it fails, "if reasoning is stripped out". The Gym side of this
+      # same chain keeps reasoning, so dropping it here made the trained sequence
+      # disagree with the sampled one.
       #
-      # Tool calls and their results are still carried; only the reasoning is
-      # dropped, which is how these models are meant to be driven across turns.
-      truncate_history_thinking: true
+      # It also runs against how tool loops are actually driven. Dropping prior
+      # reasoning is normal for plain chat and suspended for tool calls: DeepSeek
+      # rejects the request outright without it, Qwen documents the exception for
+      # multi-step tool calls, Anthropic requires the blocks echoed back, and
+      # OpenAI measures roughly 3% on SWE-bench for omitting them.
+      #
+      # Every other one of the 22 set-sites in this tree is false, including
+      # examples/nemo_gym/nemotron-3.5-lightning/rlvr.yaml for this same model.
+      truncate_history_thinking: false
 
 checkpointing:
   # The signal canary allowed 50 minutes because it ran a single step.
