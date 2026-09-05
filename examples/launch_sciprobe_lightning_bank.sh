@@ -61,6 +61,20 @@ GRADING_PYTHON="$(realpath "${GRADING_PYTHON:?set GRADING_PYTHON to the grading 
 # Defaults to the whole bank; point at a subset to train on part of it.
 TRAIN_PATH="$(realpath "${TRAIN_PATH:-${BANK_DIR}/train.jsonl}")"
 
+# uv cache the image's Ray actor venvs were built against.
+#
+# Those venvs are not self-contained. The DTensor policy worker venv holds 890
+# real files and 66313 symlinks, every one pointing into /root/.cache/uv, the
+# path the cache was mounted at while the image was built. Without that cache
+# the package directories still exist but their contents do not resolve, so
+# import torch quietly yields a namespace package with __file__ None and
+# torch.nn.functional does not exist. Mount the same cache at the path the
+# links record.
+IMAGE_UV_CACHE="${IMAGE_UV_CACHE:-}"
+if [[ -n "${IMAGE_UV_CACHE}" ]]; then
+  IMAGE_UV_CACHE="$(realpath "${IMAGE_UV_CACHE}")"
+fi
+
 SLURM_ACCOUNT="${SLURM_ACCOUNT:?set SLURM_ACCOUNT}"
 SLURM_PARTITION="${SLURM_PARTITION:-batch}"
 SLURM_TIME_LIMIT="${SLURM_TIME_LIMIT:-04:00:00}"
@@ -99,7 +113,7 @@ fi
 # The grader tree and the grading interpreter are read through the identity mount
 # of PERSISTENT_ROOT, so both must live under it. A conda prefix bakes its own
 # absolute path into shebangs and R configuration, so it cannot be remapped.
-for required in "${BANK_DIR}" "${GRADING_PYTHON}" "${TRAIN_PATH}"; do
+for required in "${BANK_DIR}" "${GRADING_PYTHON}" "${TRAIN_PATH}" ${IMAGE_UV_CACHE:+"${IMAGE_UV_CACHE}"}; do
   case "${required}" in
     "${PERSISTENT_ROOT}"/*) ;;
     *) echo "Must live under PERSISTENT_ROOT (${PERSISTENT_ROOT}): ${required}" >&2; exit 1 ;;
@@ -139,6 +153,9 @@ export WANDB_MODE=offline
 export BASE_LOG_DIR="${RAY_LOG_DIR}"
 export CONTAINER_WORKDIR="${CONTAINER_CODE_DIR}"
 export MOUNTS="${CODE_DIR}:${CONTAINER_CODE_DIR},${MODEL_PATH}:${MODEL_PATH}:ro,${PERSISTENT_ROOT}:${PERSISTENT_ROOT}"
+if [[ -n "${IMAGE_UV_CACHE}" ]]; then
+  export MOUNTS="${MOUNTS},${IMAGE_UV_CACHE}:/root/.cache/uv:ro"
+fi
 
 export SCIPROBE_PROBE_BANK_ROOT="${BANK_DIR}/grader"
 export SCIPROBE_CHECKER_PYTHON="${GRADING_PYTHON}"
@@ -170,6 +187,8 @@ export COMMAND="export PATH=/opt/uv/bin:/opt/nemo_rl_venv/bin:\${PATH} && \
   /opt/ray_venvs/nemo_rl.environments.nemo_gym.NemoGym/bin/python \
     examples/validate_sciprobe_no_replay.py && \
   test -x /opt/ray_venvs/nemo_rl.models.policy.workers.dtensor_policy_worker_v2.DTensorPolicyWorkerV2/bin/python && \
+  /opt/ray_venvs/nemo_rl.models.policy.workers.dtensor_policy_worker_v2.DTensorPolicyWorkerV2/bin/python \
+    -c 'import torch; assert torch.__file__, \"torch resolved as a namespace package: the image uv cache is not mounted\"; print(\"torch\", torch.__version__)' && \
   /opt/ray_venvs/nemo_rl.models.policy.workers.dtensor_policy_worker_v2.DTensorPolicyWorkerV2/bin/python \
     examples/validate_lightning_mtp_disabled.py --model ${MODEL_PATH} && \
   uv run --locked --no-sync python examples/validate_lightning_tool_tokenization.py \
@@ -214,6 +233,7 @@ echo "checker_python=${SCIPROBE_CHECKER_PYTHON}"
 echo "sandbox_mount=${BANK_DIR}/policy:/workspace/sciprobe-probe:ro"
 echo "nodes=${SLURM_NODES} gpus_per_node=${SLURM_GPUS_PER_NODE}"
 echo "landlock_min_abi=${SCIPROBE_LANDLOCK_MIN_ABI:-3 (strict default)}"
+echo "image_uv_cache=${IMAGE_UV_CACHE:-<unset>}"
 
 if [[ "${DRY_RUN}" == "true" ]]; then
   printf 'sbatch_cmd='
