@@ -1,0 +1,47 @@
+# GRPO over a SciProbe bank on one node of 8x A100 80GB.
+#
+# The canary chain below it trains one probe for one step, which is the right
+# shape for proving the plumbing and the wrong shape for a bank. Three knobs
+# move, and one inherited default is corrected.
+#
+# Several probes per step, because GRPO's advantage is zero for a group whose
+# rollouts all agree. A hard probe usually produces eight wrong answers and
+# therefore no gradient at all, so a single probe per step makes the run's
+# outcome a coin flip on which probe came first. Four probes per step gives four
+# independent chances of a mixed group.
+#
+# train_global_batch_size tracks the product. loss_fn.force_on_policy_ratio is
+# true in this chain, which requires
+# train_global_batch_size == num_prompts_per_step * num_generations_per_prompt.
+# 4 x 8 = 32. Memory does not move with it: train_micro_batch_size stays 1 and
+# the rest is gradient accumulation.
+#
+# exec_timeout_s is the correction. The chain inherits 30 seconds from the tool
+# canary, whose task was a toy. These probes recompute a scientific result from
+# real data with pandas, scipy or R, and 30 seconds silently truncates that work
+# into a wrong answer. A timeout and a genuinely wrong answer are the same
+# reward, so leaving it would make an infrastructure limit look like a model
+# failure. The sandbox gate pins NUM_WORKERS=1, so tool calls serialise per node
+# and this cannot be unbounded either; 120 seconds is the compromise.
+defaults: grpo-nemotron3.5-lightning-30ba3b-1n8g-automodel-sciprobe-signal-a100.yaml
+
+grpo:
+  num_prompts_per_step: 4
+  max_num_steps: 2
+
+policy:
+  train_global_batch_size: 32
+
+checkpointing:
+  # The signal canary allowed 50 minutes because it ran a single step. A bank
+  # step is four probes wide and the model load alone costs a good part of that.
+  checkpoint_must_save_by: 00:03:30:00
+
+env:
+  nemo_gym:
+    ns_tools:
+      resources_servers:
+        sciprobe_ns_tools:
+          nemo_skills_tool_overrides:
+            DirectPythonTool:
+              exec_timeout_s: 120

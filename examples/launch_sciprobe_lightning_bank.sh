@@ -41,7 +41,7 @@ EXP_NAME="sciprobe_rl_lightning-bank-${RUN_ID}"
 
 CODE_DIR="$(realpath "${CODE_DIR:-$PWD}")"
 CONTAINER_CODE_DIR="${CONTAINER_CODE_DIR:-/workspace/RL}"
-CONFIG_PATH="${CONFIG_PATH:-examples/configs/recipes/llm/grpo-nemotron3.5-lightning-30ba3b-1n8g-automodel-sciprobe-signal-a100.yaml}"
+CONFIG_PATH="${CONFIG_PATH:-examples/configs/recipes/llm/grpo-nemotron3.5-lightning-30ba3b-1n8g-automodel-sciprobe-bank-a100.yaml}"
 
 MODEL_PATH="${MODEL_PATH:?set MODEL_PATH to the Lightning checkpoint directory}"
 CONTAINER="${CONTAINER:?set CONTAINER to the training image}"
@@ -55,7 +55,7 @@ TRAIN_PATH="$(realpath "${TRAIN_PATH:-${BANK_DIR}/train.jsonl}")"
 
 SLURM_ACCOUNT="${SLURM_ACCOUNT:?set SLURM_ACCOUNT}"
 SLURM_PARTITION="${SLURM_PARTITION:-batch}"
-SLURM_TIME_LIMIT="${SLURM_TIME_LIMIT:-02:00:00}"
+SLURM_TIME_LIMIT="${SLURM_TIME_LIMIT:-04:00:00}"
 SLURM_NODES="${SLURM_NODES:-1}"
 SLURM_GPUS_PER_NODE="${SLURM_GPUS_PER_NODE:-8}"
 SLURM_DEPENDENCY="${SLURM_DEPENDENCY:-}"
