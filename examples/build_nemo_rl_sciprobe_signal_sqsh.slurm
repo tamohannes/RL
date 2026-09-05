@@ -113,11 +113,14 @@ enroot start \
     export NEMO_GYM_EXTRA_ROOTS=/workspace/RL/examples/nemo_gym_extensions
     export NRL_FORCE_REBUILD_VENVS=false
 
-    # Enroot does not preserve the managed Python the release image installed
-    # under /root, so any stage that starts from an image which has not already
-    # been repaired has to reinstate uv and relink every frozen venv interpreter
-    # before the project can be invoked. This is idempotent: when an earlier
-    # stage already did it, the probe below finds a working uv and skips.
+    # Enroot does not preserve the managed Python the release image installs
+    # under /root, so the frozen venv interpreters arrive here dangling and every
+    # console script built from them fails with exit 127.
+    #
+    # Repair what is broken and leave what works. An earlier attempt gated the
+    # whole repair on /opt/nemo_rl_venv having a usable python, which it did, so
+    # the repair was skipped while the interpreters that actually matter, the ray
+    # venvs, stayed dangling. The gym CLI then died on a missing bin/python3.
     #
     # Being idempotent is what lets this stage build directly on the base image.
     # The intermediate ns-tools stage bakes servers this run does not use, since
@@ -125,23 +128,31 @@ enroot start \
     # sciprobe_checks and sciprobe_ns_tools, and the chain deletes ns_tools
     # outright. Skipping it saves an image and a build.
     export UV_INSTALL_DIR=/opt/uv/bin
-    if ! command -v uv >/dev/null 2>&1 || ! /opt/nemo_rl_venv/bin/python --version >/dev/null 2>&1; then
-      echo "repairing uv and frozen venv interpreters"
-      mkdir -p "${UV_INSTALL_DIR}" "${UV_PYTHON_INSTALL_DIR}"
+    mkdir -p "${UV_INSTALL_DIR}" "${UV_PYTHON_INSTALL_DIR}"
+    if ! command -v uv >/dev/null 2>&1; then
       curl -LsSf https://astral.sh/uv/0.11.28/install.sh | \
         env UV_INSTALL_DIR="${UV_INSTALL_DIR}" UV_NO_MODIFY_PATH=1 sh
       hash -r
-      uv python install 3.13.14
-      portable_python="$(uv python find --managed-python --no-project --resolve-links 3.13.14)"
-      test -x "${portable_python}"
-      while IFS= read -r -d "" python_link; do
-        ln -sfn "${portable_python}" "${python_link}"
-      done < <(find /opt/nemo_rl_venv /opt/ray_venvs -type l -name python -print0)
-      ln -sfn /opt/uv/bin/uv /usr/local/bin/uv
-    else
-      echo "uv already present, skipping repair"
     fi
+    ln -sfn /opt/uv/bin/uv /usr/local/bin/uv
+    uv python install 3.13.14
+    portable_python="$(uv python find --managed-python --no-project --resolve-links 3.13.14)"
+    test -x "${portable_python}"
+
+    # A venv refers to its interpreter as python, python3 and a versioned name.
+    # Relink every one that does not currently resolve, and create it when the
+    # release image never shipped it. The -x test is false for a dangling
+    # symlink and true for a working one, so a healthy interpreter is untouched.
+    for venv_bin in /opt/nemo_rl_venv/bin /opt/ray_venvs/*/bin; do
+      [ -d "${venv_bin}" ] || continue
+      for interpreter_name in python python3 python3.13; do
+        if [ ! -x "${venv_bin}/${interpreter_name}" ]; then
+          ln -sfn "${portable_python}" "${venv_bin}/${interpreter_name}"
+        fi
+      done
+    done
     /opt/nemo_rl_venv/bin/python --version
+    /opt/ray_venvs/nemo_rl.environments.nemo_gym.NemoGym/bin/python --version
 
     cd /workspace/RL
     uv lock --check
