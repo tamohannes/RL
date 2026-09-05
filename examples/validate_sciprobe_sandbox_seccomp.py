@@ -692,6 +692,14 @@ def _worker_probe(
             os.environ.get(_RESTRICTED_UNPICKLER_ENV) == "1"
         )
         result["landlock_active"] = os.environ.get(_LANDLOCK_ACTIVE_ENV) == "1"
+        result["landlock_effective_abi"] = os.environ.get(
+            _LANDLOCK_EFFECTIVE_ABI_ENV, ""
+        )
+        result["landlock_missing_controls"] = [
+            control
+            for control in os.environ.get(_LANDLOCK_MISSING_CONTROLS_ENV, "").split(",")
+            if control
+        ]
         result["session_state_directory"] = os.environ[_SESSION_STATE_ENV]
         result["session_var_tmp_directory"] = os.environ[_SESSION_VAR_TMP_ENV]
         result["session_shm_directory"] = os.environ[_SESSION_SHM_ENV]
@@ -1606,7 +1614,6 @@ def _run_probe(hook_dir: Path) -> dict[str, Any]:
         "self_proc_read_allowed",
         "readonly_probe_read_allowed",
         "readonly_probe_write_denied",
-        "readonly_probe_truncate_denied",
         "readonly_probe_delete_denied",
         "readonly_probe_hardlink_denied",
         "python_imports_allowed",
@@ -1672,6 +1679,17 @@ def _run_probe(hook_dir: Path) -> dict[str, Any]:
         "control_socket_preserved",
     )
     failed = [name for name in boolean_checks if result.get(name) is not True]
+    # Truncation confinement is Landlock ABI 3. On an older kernel the sandbox
+    # cannot install it, so asserting it would fail for a reason no
+    # configuration can fix. Require it whenever the kernel offers it, and
+    # otherwise record it as unenforced so the run states what confined it
+    # rather than implying a guarantee it never had.
+    unenforced = []
+    if "truncate" in result.get("landlock_missing_controls", []):
+        unenforced.append("readonly_probe_truncate_denied")
+    elif result.get("readonly_probe_truncate_denied") is not True:
+        failed.append("readonly_probe_truncate_denied")
+    result["unenforced_controls"] = unenforced
     if result.get("non_unix_inherited_socket_count") != 0:
         failed.append("non_unix_inherited_socket_count")
     if result.get("untrusted_inherited_socket_count") != 0:
