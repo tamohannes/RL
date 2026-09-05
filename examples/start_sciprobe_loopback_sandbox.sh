@@ -57,7 +57,29 @@ printf '%s\n' '[SCIPROBE_SANDBOX_SECCOMP_PREFLIGHT_OK]' > "${seccomp_ready_file}
 chmod 400 "${seccomp_ready_file}"
 echo "[SCIPROBE_SANDBOX_SECCOMP_PREFLIGHT_OK]"
 
-base_start=/start-with-nginx.sh
+# Follow the interpreter indirection when the image uses one.
+#
+# The stock image puts the uWSGI bind template directly in /start-with-nginx.sh.
+# A science-enriched image replaces that file with a short wrapper that prepends
+# its own environment to PATH and execs /start-with-nginx.real.sh, because
+# start-with-nginx launches uwsgi by bare name. Prepending the PATH is what
+# swaps the interpreter the sandbox executes model code under, and it swaps the
+# whole thing rather than grafting packages onto the stock one, so there is no
+# mixed-ABI site-packages anywhere.
+#
+# Without this the patch below reads the 164-byte wrapper, finds no bind
+# template and exits on "unexpected NeMo-Skills uWSGI bind template".
+if [[ -r /start-with-nginx.real.sh ]]; then
+  if [[ -x /app/kernel_env/bin/uwsgi ]]; then
+    export PATH=/app/kernel_env/bin:${PATH}
+  else
+    echo "image has /start-with-nginx.real.sh but no /app/kernel_env/bin/uwsgi" >&2
+    exit 2
+  fi
+  base_start=/start-with-nginx.real.sh
+else
+  base_start=/start-with-nginx.sh
+fi
 base_nginx=/etc/nginx/nginx.conf.template
 patched_start=/tmp/sciprobe-start-with-nginx.sh
 patched_nginx=/tmp/sciprobe-nginx.conf.template
