@@ -34,6 +34,14 @@ umask 077
 # its own probes into a copy of the extensions tree so the committed config stays a
 # single readable example.
 #
+# Automodel is on PYTHONPATH for the same reason Gym is. Both ship as editable
+# installs in the image, and the editable finder does not resolve at runtime:
+# the worker venv has its site-packages on sys.path and the source tree is
+# present, yet importing the package still fails. Gym was already worked around
+# this way, which is why nemo_gym imported and nemo_automodel did not. The
+# submodule is pinned at the commit the venv was built from, so this points at
+# the same source the editable install intended.
+#
 # Reuse RUN_ID only with RESUME=true; use a new suffix for a fresh experiment.
 
 RUN_ID="${RUN_ID:-r1}"
@@ -136,7 +144,7 @@ export SCIPROBE_PROBE_BANK_ROOT="${BANK_DIR}/grader"
 export SCIPROBE_CHECKER_PYTHON="${GRADING_PYTHON}"
 
 export COMMAND="export PATH=/opt/uv/bin:/opt/nemo_rl_venv/bin:\${PATH} && \
-  export PYTHONPATH=${CONTAINER_CODE_DIR}:${CONTAINER_CODE_DIR}/3rdparty/Gym-workspace/Gym:\${PYTHONPATH:-} && \
+  export PYTHONPATH=${CONTAINER_CODE_DIR}:${CONTAINER_CODE_DIR}/3rdparty/Gym-workspace/Gym:${CONTAINER_CODE_DIR}/3rdparty/Automodel-workspace/Automodel:\${PYTHONPATH:-} && \
   export UV_PROJECT_ENVIRONMENT=/opt/nemo_rl_venv && \
   export UV_PYTHON_INSTALL_DIR=/opt/uv-python && \
   export NEMO_RL_VENV_DIR=/opt/ray_venvs && \
