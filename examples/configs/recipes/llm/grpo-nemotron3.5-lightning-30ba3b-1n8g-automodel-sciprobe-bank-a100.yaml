@@ -26,11 +26,26 @@
 defaults: grpo-nemotron3.5-lightning-30ba3b-1n8g-automodel-sciprobe-signal-a100.yaml
 
 grpo:
-  num_prompts_per_step: 4
-  max_num_steps: 2
+  # One prompt per step, and the probes come from stepping rather than from
+  # widening the batch.
+  #
+  # The synchronous NeMo-Gym path calls the rollout with
+  # num_generations=input_batch.size and returns_entire_batch=True, so the whole
+  # batch is one prompt group. Four probes in a batch then trip the invariant
+  # that a group carries a single _ng_task_index, which is what reward
+  # attribution rests on. That is an upstream constraint, not something to route
+  # around in a recipe.
+  #
+  # Six steps of one probe gives the same six chances at a group whose rollouts
+  # disagree, which is what a nonzero advantage needs, and it reads more clearly
+  # per probe besides.
+  num_prompts_per_step: 1
+  max_num_steps: 6
 
 policy:
-  train_global_batch_size: 32
+  # Tracks num_prompts_per_step * num_generations_per_prompt, which
+  # loss_fn.force_on_policy_ratio requires. 1 * 8.
+  train_global_batch_size: 8
 
   # The canary chain sizes the window for a single-turn task. These episodes are
   # multi-turn: the task, every tool call, every block of tool output and the
@@ -64,9 +79,12 @@ policy:
       truncate_history_thinking: true
 
 checkpointing:
-  # The signal canary allowed 50 minutes because it ran a single step. A bank
-  # step is four probes wide and the model load alone costs a good part of that.
+  # The signal canary allowed 50 minutes because it ran a single step.
   checkpoint_must_save_by: 00:03:30:00
+  # The canary saved every step, which it could afford at one step. Writing a
+  # 30B checkpoint after each of six would cost more wall clock than the six
+  # steps do, so save once at the end instead.
+  save_period: 6
 
 env:
   nemo_gym:
