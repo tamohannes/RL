@@ -32,6 +32,21 @@ grpo:
 policy:
   train_global_batch_size: 32
 
+  # The canary chain sizes the window for a single-turn task. These episodes are
+  # multi-turn: the task, every tool call, every block of tool output and the
+  # reasoning between them all accumulate in one prompt. At 12288 that prompt
+  # outgrew the window part way through the first batch, vLLM refused it with
+  # "Prompt length (12313) fills or exceeds max_model_len", and the rollout
+  # surfaced as an HTTP 500 that failed the whole run. Five of the first thirteen
+  # rollouts reached that limit, three of them fatally, so it was the common case
+  # rather than an outlier.
+  #
+  # The checkpoint itself allows 262144, so this is a recipe limit and not a model
+  # one. 32768 leaves real headroom for tool output while keeping the training
+  # sequence short enough to stay within an 80GB card at micro batch 1 with
+  # activation checkpointing on.
+  max_total_sequence_length: 32768
+
 checkpointing:
   # The signal canary allowed 50 minutes because it ran a single step. A bank
   # step is four probes wide and the model load alone costs a good part of that.
