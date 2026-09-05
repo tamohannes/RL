@@ -46,6 +46,22 @@ policy:
     # Back on. The canary could afford to keep activations resident on a 288 GB
     # card; at 80 GB the memory matters more than the recompute.
     activation_checkpointing: true
+
+    # Keep parameters and gradients on the host between uses.
+    #
+    # The last OOM missed by about 250MB: it asked for 7.28 GiB with 7.02 GiB
+    # free and 65.03 GiB resident. That resident figure is not the KV cache and
+    # is barely affected by the parallelism layout; dropping expert parallelism
+    # from 8 to 2 to give FSDP a data-parallel axis moved it only from 67.98 to
+    # 65.03 GiB. It is the optimizer: TE FusedAdam here keeps bf16 moments but
+    # also master_weights, an fp32 copy of every parameter, so params, grads,
+    # master weights and two moments come to roughly 37GB before activations.
+    #
+    # Offloading to host memory buys back far more than the margin needed, and
+    # the node has 1.8TB of it. The cost is a slower optimizer step, which is
+    # the cheapest thing to spend here: generation takes 12 to 20 minutes per
+    # step and training takes two or three.
+    cpu_offload: true
     moe_parallelizer:
       ignore_router_for_ac: true
 
