@@ -1,11 +1,18 @@
-# Signal canary on 2 nodes of 8x A100 80GB.
+# Signal canary on one node of 8x A100 80GB.
 #
 # The canary chain was tuned for one node of 4x GB300, where 288 GB per GPU made
 # 1152 GB available and let activation checkpointing stay off. An 80 GB card is a
-# different machine: upstream's own reference for this model
-# (dapo-nanov3.5-30BA3B-4n8g-automodel.yaml) runs it on 4 nodes of 8x H100 80GB.
-# Two nodes give 1280 GB, slightly more than the GB300 configuration it is
-# reproducing, and schedule as fast as one.
+# different machine, and one node of eight gives 640 GB.
+#
+# It has to be one node. SciProbe's hardening is single-node by construction:
+# ray.sub refuses RAY_LOOPBACK_ONLY=1 on a multi-node job, and the hardened
+# sandbox requires SANDBOX_FORCE_SINGLE_NODE=1. Spreading over two nodes would
+# mean giving up loopback-only Ray and the sandbox's isolation, which is a much
+# worse trade than paying for memory with recompute.
+#
+# 640 GB is enough because generation is colocated: NeMo RL sleeps vLLM during
+# the training step and refits afterwards, so the peak is the larger of the two
+# phases rather than their sum. Activation checkpointing carries the rest.
 #
 # Everything about the experiment is inherited unchanged: one real probe, eight
 # generations, an 8192 token budget and a 12288 token context. Only placement and
@@ -50,4 +57,4 @@ policy:
 
 cluster:
   gpus_per_node: 8
-  num_nodes: 2
+  num_nodes: 1
