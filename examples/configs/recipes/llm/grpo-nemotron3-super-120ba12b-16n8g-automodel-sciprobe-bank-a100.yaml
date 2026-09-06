@@ -1,0 +1,51 @@
+# GRPO over a SciProbe bank with Nemotron-3-Super-120B-A12B on 16 nodes of 8x A100.
+#
+# Same probes, same reward contract and same agent budget as the Lightning
+# recipe. Only the model and the parallelism change, so a difference in outcome
+# is attributable to the model rather than to the task.
+#
+# The upstream Super recipe is not a drop-in here. It runs 16 prompts of 8
+# generations for a global batch of 128 on 128 GPUs, which works because
+# data_parallel_size is 128 and the batch divides by it. This path pins
+# num_prompts_per_step at 1, because the synchronous NeMo Gym rollout requires a
+# single _ng_task_index per group, so the generation count has to carry the
+# whole batch on its own. At tp=1 that would mean 128 generations of one probe
+# per step, and with tool execution serialised per node that is not a step, it
+# is an afternoon.
+#
+# Tensor parallelism is what makes the arithmetic work. data_parallel_size is
+# the inferred dimension of np.arange(world).reshape(pp, -1, cp, tp), so tp=8
+# gives 128 / 8 = 16, and a group of 16 matches what the two-node Lightning runs
+# already use.
+#
+# Memory is comfortable here, unlike Lightning on two nodes. The 120B is split
+# 128 ways for the non-expert weights, by tp times dp, and 128 ways for the
+# experts, by ep times dp, so the resident state is a fraction of what a 30B on
+# 16 GPUs had to hold. That is what buys back the full 40960 window.
+defaults: grpo-nemotron3.5-lightning-30ba3b-1n8g-automodel-sciprobe-bank-a100.yaml
+
+grpo:
+  num_prompts_per_step: 1
+  # Must equal data_parallel_size, which is 128 / tp = 16.
+  num_generations_per_prompt: 16
+  max_num_steps: 4
+
+policy:
+  model_name: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+  tokenizer:
+    name: ${policy.model_name}
+  train_global_batch_size: 16
+
+  dtensor_cfg:
+    # tp=8 is doing two jobs: it brings data_parallel_size down to 16 so the
+    # group size is workable, and it shards the vocabulary so the logit tensor
+    # that dominated every Lightning OOM is split across the tensor-parallel
+    # ranks instead of materialised whole on each.
+    tensor_parallel_size: 8
+    expert_parallel_size: 8
+    activation_checkpointing: true
+    cpu_offload: false
+
+cluster:
+  gpus_per_node: 8
+  num_nodes: 16
