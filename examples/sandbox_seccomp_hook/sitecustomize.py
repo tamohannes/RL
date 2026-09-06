@@ -309,18 +309,24 @@ def _install_restricted_connection_unpickler() -> None:
         return
 
     def restricted_recv(self: _ConnectionBase) -> object:
-        # Closing on a refused payload is what turned a refusal into a lost
-        # session. Separate the two failures: a transport error means the pipe
-        # is already unusable and closing is right, while a refused pickle means
-        # the pipe is fine and only this message is unacceptable. The message
-        # boundary is intact either way, because recv_bytes consumed a whole
-        # frame before the unpickler ever saw it.
+        # Refusing a payload still tears the channel down, deliberately. An
+        # attempt to smuggle a reducer, an arbitrary global or a persistent id
+        # over this pipe is hostile, and the right answer to a hostile control
+        # message is to stop talking rather than to read the next one.
+        #
+        # This was briefly relaxed to keep a session alive across a refusal,
+        # which was solving the wrong half of the problem. Sessions were dying
+        # because ordinary exceptions were being refused at all; allowing
+        # builtin exception types in find_class fixes that at the source, and
+        # nothing legitimate reaches this branch any more. Relaxing it also
+        # broke the property the sandbox validator checks, since
+        # _control_payload_rejected returns receiver.closed.
         try:
             payload = self.recv_bytes(maxlength=_MAX_CONTROL_MESSAGE_BYTES)
+            return _restricted_loads(payload)
         except Exception:
             self.close()
             raise
-        return _restricted_loads(payload)
 
     restricted_recv._sciprobe_restricted_unpickler = True
     _ConnectionBase.recv = restricted_recv
