@@ -1,0 +1,43 @@
+# GRPO over a SciProbe bank on eight nodes of 8x A100 80GB.
+#
+# Two nodes could not hold the eval-matched window. At 40960 the run reached
+# step 2 and died asking for 15.47 GiB with 1.80 GiB free and 73.08 GiB already
+# resident. Nothing about that is tunable from the recipe: the [batch, seq,
+# vocab] logit tensor is 20 GiB at this window and the forward materialises it,
+# and tensor parallelism would shard the vocabulary but NemotronH ships no
+# _tp_plan, so tensor_parallel_size above 1 fails an assert. The remaining lever
+# is sharding the state further, which means more nodes.
+#
+# Eight nodes rather than four for margin. data_parallel_size is the world size
+# here, so the resident state divides by 64 instead of 16, which is a large
+# multiple of the roughly 14 GiB the two-node run came up short by.
+#
+# The group size follows the world size and that is fine. The batch must divide
+# by data_parallel_size and equal prompts times generations, with prompts pinned
+# at 1 by the synchronous Gym path, so 64 GPUs means 64 generations. The wall
+# clock does not scale with it: there is one sandbox per node and tool execution
+# serialises within a sandbox, so 64 rollouts over 8 sandboxes is 8 per sandbox,
+# the same per-sandbox load two nodes already sustained at 16.
+#
+# A 64-wide group also attacks the actual problem. The gradient has been zero
+# because every rollout in a group agreed, and 64 samples of a probe disagree
+# far more often than 8 or 16.
+defaults: grpo-nemotron3.5-lightning-30ba3b-1n8g-automodel-sciprobe-bank-a100.yaml
+
+grpo:
+  num_prompts_per_step: 1
+  # Must be a multiple of data_parallel_size, which is the world size.
+  num_generations_per_prompt: 64
+  max_num_steps: 4
+
+policy:
+  train_global_batch_size: 64
+
+  dtensor_cfg:
+    expert_parallel_size: 8
+    activation_checkpointing: true
+    cpu_offload: false
+
+cluster:
+  gpus_per_node: 8
+  num_nodes: 8

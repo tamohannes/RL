@@ -5,43 +5,50 @@
 # is attributable to the model rather than to the task.
 #
 # The upstream Super recipe is not a drop-in here. It runs 16 prompts of 8
-# generations for a global batch of 128 on 128 GPUs, which works because
-# data_parallel_size is 128 and the batch divides by it. This path pins
-# num_prompts_per_step at 1, because the synchronous NeMo Gym rollout requires a
-# single _ng_task_index per group, so the generation count has to carry the
-# whole batch on its own. At tp=1 that would mean 128 generations of one probe
-# per step, and with tool execution serialised per node that is not a step, it
-# is an afternoon.
+# generations for a global batch of 128, which works because the batch divides
+# by data_parallel_size. This path pins num_prompts_per_step at 1, since the
+# synchronous NeMo Gym rollout requires a single _ng_task_index per group, so
+# the generation count has to carry the whole batch alone.
 #
-# Tensor parallelism is what makes the arithmetic work. data_parallel_size is
-# the inferred dimension of np.arange(world).reshape(pp, -1, cp, tp), so tp=8
-# gives 128 / 8 = 16, and a group of 16 matches what the two-node Lightning runs
-# already use.
+# data_parallel_size is the inferred dimension of
+# np.arange(world).reshape(pp, -1, cp, tp). Tensor parallelism would divide it
+# down, but NemotronH has no _tp_plan (qwen2, qwen3, ernie4_5, gemma4_moe,
+# mistral3 and llama do), so tensor_parallel_size above 1 fails the assert in
+# nemo_rl/models/dtensor/parallelize.py. That leaves dp equal to the world size,
+# and the generation count equal to it too: 128 on sixteen nodes.
 #
-# Memory is comfortable here, unlike Lightning on two nodes. The 120B is split
-# 128 ways for the non-expert weights, by tp times dp, and 128 ways for the
-# experts, by ep times dp, so the resident state is a fraction of what a 30B on
-# 16 GPUs had to hold. That is what buys back the full 40960 window.
+# A group of 128 is affordable because the sandboxes scale with the nodes. There
+# is one sandbox per node and tool execution is serialised within it, so 128
+# rollouts across 16 sandboxes is 8 per sandbox, the same per-sandbox load the
+# two-node Lightning runs already sustain. The step should cost about what a
+# 16-wide group costs on two nodes.
+#
+# It is also the best thing that could happen to the gradient. A zero advantage
+# comes from every rollout in a group agreeing, and 128 samples of a probe
+# disagree far more often than 8.
+#
+# Memory is comfortable without tensor parallelism. The 120B splits 128 ways, so
+# the resident state is roughly 9GB per GPU against the 65GB a 30B had to hold
+# on 16 GPUs, which leaves ample room for the 20 GiB logit tensor at this window.
 defaults: grpo-nemotron3.5-lightning-30ba3b-1n8g-automodel-sciprobe-bank-a100.yaml
 
 grpo:
   num_prompts_per_step: 1
-  # Must equal data_parallel_size, which is 128 / tp = 16.
-  num_generations_per_prompt: 16
+  # Must be a multiple of data_parallel_size, which is the world size here.
+  num_generations_per_prompt: 128
   max_num_steps: 4
 
 policy:
   model_name: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
   tokenizer:
     name: ${policy.model_name}
-  train_global_batch_size: 16
+  train_global_batch_size: 128
 
   dtensor_cfg:
-    # tp=8 is doing two jobs: it brings data_parallel_size down to 16 so the
-    # group size is workable, and it shards the vocabulary so the logit tensor
-    # that dominated every Lightning OOM is split across the tensor-parallel
-    # ranks instead of materialised whole on each.
-    tensor_parallel_size: 8
+    # Left at the inherited 1. Tensor parallelism would have been the elegant
+    # answer, since it shards the vocabulary and so the logit tensor that caused
+    # every OOM in this branch, but NemotronH ships no _tp_plan and the
+    # parallelize path asserts on that.
     expert_parallel_size: 8
     activation_checkpointing: true
     cpu_offload: false
