@@ -24,8 +24,9 @@ policy:
   dtensor_cfg:
     # Expert parallelism has to leave room for a data-parallel axis.
     #
-    # data_parallel_size is derived as world_size / (tp * cp * ep). One rank per
-    # GPU meant 8 / (1 * 1 * 8) = 1, and with no DP axis FSDP has nothing to
+    # data_parallel_size is world_size / (tp * cp * pp). Expert parallelism
+    # does NOT divide out: lm_policy.py reshapes the world by (pp, -1, cp, tp)
+    # only, so dp is unaffected by ep. An earlier note here said otherwise.
     # shard along: experts were split 8 ways by EP while every non-expert
     # parameter, gradient and optimizer state sat in full on every GPU. The run
     # log confirms it, data_parallel_size=1, and so does the arithmetic, roughly

@@ -26,6 +26,30 @@
 defaults: grpo-nemotron3.5-lightning-30ba3b-1n8g-automodel-sciprobe-signal-a100.yaml
 
 grpo:
+  # Do not divide the advantage by the group's standard deviation.
+  #
+  # This one is measured, not stylistic. The baseline here is leave-one-out, so
+  # when exactly one rollout in a group is correct that rollout's leave-one-out
+  # std is 0, the non_zero_std_mask in GRPOAdvantageEstimator skips it, and it
+  # keeps an advantage of +1. Every wrong rollout has a non-zero std and is
+  # divided by a small number, which magnifies it. Reproducing
+  # calculate_baseline_and_std_per_prompt verbatim on a single-success group:
+  #
+  #     group   normalize=true (sum)   normalize=false (sum)
+  #         8                 -1.646                   0.000
+  #        64                 -6.937                   0.000
+  #       128                -10.269                   0.000
+  #
+  # A baseline exists so a group's push and pull cancel. With normalisation on,
+  # the first time the model ever solves a probe the net gradient points away
+  # from the group that solved it, and it gets worse as the group grows, which
+  # is precisely the direction the parallelism forces us. With it off the sum is
+  # zero at every group size, which is the intended behaviour.
+  #
+  # Advantage magnitudes drop by roughly 1/std as a result, so read grad_norm
+  # before concluding nothing happened.
+  normalize_rewards: false
+
   # One prompt per step, and the probes come from stepping rather than from
   # widening the batch.
   #
@@ -96,6 +120,19 @@ policy:
   logprob_chunk_size: 2048
 
   generation:
+    # Sample at 1.0 during training, report at evaluation's 0.7.
+    #
+    # A zero gradient comes from every rollout in a group agreeing, and 0.7
+    # narrows the distribution that the group is drawn from, which is the one
+    # thing guaranteed to make them agree. Nothing corrects the resulting
+    # sampling/training mismatch either, since use_importance_sampling_correction
+    # is false and force_on_policy_ratio pins the ratio at 1.
+    #
+    # val_temperature is pinned to 0.7 explicitly because it defaults to
+    # ${.temperature} and would otherwise follow this change, and the reported
+    # number should stay comparable with sciprobe/probe_eval.py.
+    temperature: 1.0
+    val_temperature: 0.7
     # 3072 per turn instead of 8192. The budget is per generation, and an episode
     # accumulates every turn into one prompt, so this is what actually decides
     # how long a twenty-step episode gets. The traces do not need 8192: the tool
@@ -223,3 +260,10 @@ env:
               # mid-run; matching evaluation is better than inventing a third
               # number.
               exec_timeout_s: 90
+
+data:
+  # Draw probes at random rather than in file order. The canary parent sets
+  # false, which is right for a one-probe canary and wrong for a bank: with a
+  # handful of steps the run would otherwise only ever see the first few rows of
+  # the file, run after run. grpo.seed keeps it reproducible.
+  shuffle: true
