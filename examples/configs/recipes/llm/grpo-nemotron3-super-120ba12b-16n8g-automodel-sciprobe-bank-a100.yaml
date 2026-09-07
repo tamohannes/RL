@@ -44,6 +44,27 @@ policy:
     name: ${policy.model_name}
   train_global_batch_size: 128
 
+  generation:
+    vllm_cfg:
+      # Both of these are inherited from a 30B recipe and neither survives a
+      # 120B. vLLM must hold the weights inside gpu_memory_utilization before
+      # any KV cache exists, and 120B in bf16 is 240GB:
+      #
+      #   tp=4, util 0.30 ->  60GB of weights into a 24GB budget
+      #   tp=8, util 0.30 ->  30GB of weights into a 24GB budget
+      #   tp=8, util 0.70 ->  30GB of weights into a 56GB budget, 26GB for KV
+      #
+      # The first is what the run hit: _check_enough_kv_cache_memory failed
+      # because the budget was smaller than the weights, so no KV cache could be
+      # allocated at any utilisation.
+      #
+      # Raising the utilisation is affordable here in a way it was not for
+      # Lightning on two nodes. Generation is colocated but sleeps during the
+      # training step, and Super's training state is about 9GB per GPU once the
+      # 120B is split 128 ways, so the two never contend.
+      tensor_parallel_size: 8
+      gpu_memory_utilization: 0.7
+
   dtensor_cfg:
     # Left at the inherited 1. Tensor parallelism would have been the elegant
     # answer, since it shards the vocabulary and so the logit tensor that caused
